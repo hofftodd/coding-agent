@@ -33,6 +33,7 @@ ESTOP_FLAG = "estop"
 
 # Allowed edges. Anything else is a bug.
 TRANSITIONS: dict[TaskState, set[TaskState]] = {
+    TaskState.PROPOSED: {TaskState.QUEUED, TaskState.DISCARDED},
     TaskState.QUEUED: {TaskState.RUNNING, TaskState.DISCARDED, TaskState.STOPPED_BY_USER},
     TaskState.RUNNING: {
         TaskState.VALIDATING,

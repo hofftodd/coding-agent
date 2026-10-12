@@ -6,7 +6,8 @@ import type { Node } from "../types";
 
 export default function NodesPage() {
   const { data: nodes, error, reload } = usePoll<Node[]>("/api/nodes", 5000);
-  const [f, setF] = useState({ name: "", base_url: "", api_key: "", capacity: 1 });
+  const empty = { name: "", provider: "openai", base_url: "", api_key: "", capacity: 1, context_window: 32768 };
+  const [f, setF] = useState(empty);
   const [formError, setFormError] = useState("");
   const [checkErrors, setCheckErrors] = useState<Record<number, string>>({});
 
@@ -31,7 +32,9 @@ export default function NodesPage() {
             </div>
             <div className="mono small">{n.base_url}</div>
             <div className="small muted">
-              capacity {n.capacity} · checked {fmtTime(n.last_checked)} {n.has_api_key && "· api key set"}
+              {n.provider === "anthropic" ? "Claude API (planner only)" : "OpenAI-compatible"} · capacity {n.capacity} ·{" "}
+              {n.context_window.toLocaleString()} ctx · checked {fmtTime(n.last_checked)}{" "}
+              {n.has_api_key && "· api key set"}
             </div>
             <div className="small">{n.models.length ? n.models.join(", ") : <span className="muted">no models listed</span>}</div>
             <ErrorNote error={checkErrors[n.id] ?? ""} />
@@ -60,7 +63,7 @@ export default function NodesPage() {
           try {
             const n = await post<Node>("/api/nodes", f);
             await post(`/api/nodes/${n.id}/check`);
-            setF({ name: "", base_url: "", api_key: "", capacity: 1 });
+            setF(empty);
             reload();
           } catch (err) {
             setFormError((err as Error).message);
@@ -72,8 +75,27 @@ export default function NodesPage() {
           <Field label="Name">
             <input required value={f.name} placeholder="mac-studio" onChange={(e) => setF({ ...f, name: e.target.value })} />
           </Field>
-          <Field label="Base URL" hint="Including /v1">
+          <Field label="Provider" hint="Claude can be a planner; executors must be local/OpenAI-compatible">
+            <select
+              value={f.provider}
+              onChange={(e) =>
+                setF({
+                  ...f,
+                  provider: e.target.value,
+                  base_url: e.target.value === "anthropic" ? "https://api.anthropic.com" : "",
+                  context_window: e.target.value === "anthropic" ? 1000000 : 32768,
+                })
+              }
+            >
+              <option value="openai">OpenAI-compatible (llama.cpp, LM Studio, Ollama, MLX…)</option>
+              <option value="anthropic">Anthropic (Claude API)</option>
+            </select>
+          </Field>
+          <Field label="Base URL" hint={f.provider === "openai" ? "Including /v1" : "Claude API base URL"}>
             <input required className="mono" value={f.base_url} placeholder="http://192.168.1.20:8080/v1" onChange={(e) => setF({ ...f, base_url: e.target.value })} />
+          </Field>
+          <Field label="Context window (tokens)" hint="What the model can actually use; sizes task context packs">
+            <input type="number" min={1024} value={f.context_window} onChange={(e) => setF({ ...f, context_window: Number(e.target.value) })} />
           </Field>
           <Field label="API key" hint="Optional">
             <input type="password" value={f.api_key} onChange={(e) => setF({ ...f, api_key: e.target.value })} />

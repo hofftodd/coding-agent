@@ -16,6 +16,9 @@ class ProjectCreate(BaseModel):
     name: str = Field(min_length=1)
     repo_url: str = Field(min_length=1)
     milestone_branch: str = "foreman/m1"
+    feature: str = Field(default="001-initial", pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+    # Skip Phase 1 and go straight to manually added tasks.
+    skip_spec: bool = False
     test_cmd: str = ""
     executor_kind: str = "opencode"
     role_bindings: dict[str, RoleBinding] = Field(default_factory=dict)
@@ -24,6 +27,9 @@ class ProjectCreate(BaseModel):
 
 class ProjectUpdate(BaseModel):
     name: str | None = None
+    acceptance_cmd: str | None = None
+    max_task_files: int | None = Field(default=None, ge=1, le=20)
+    context_budget_pct: int | None = Field(default=None, ge=5, le=90)
     test_cmd: str | None = None
     executor_kind: str | None = None
     role_bindings: dict[str, RoleBinding] | None = None
@@ -47,6 +53,8 @@ class TaskCreate(BaseModel):
 
 class TaskUpdate(BaseModel):
     title: str | None = None
+    req_refs: list[str] | None = None
+    context_files: list[str] | None = None
     description: str | None = None
     todos: list[str] | None = None
     allowed_globs: list[str] | None = None
@@ -61,7 +69,9 @@ class TaskUpdate(BaseModel):
 
 class NodeCreate(BaseModel):
     name: str = Field(min_length=1)
+    provider: Literal["openai", "anthropic"] = "openai"
     base_url: str = Field(min_length=1)
+    context_window: int = Field(default=32768, ge=1024, le=10_000_000)
     api_key: str = ""
     capacity: int = Field(default=1, ge=1, le=64)
     models: list[str] = Field(default_factory=list)
@@ -75,3 +85,11 @@ class ControlRequest(BaseModel):
 
 class RetryRequest(BaseModel):
     reset: bool = False  # discard the task clone and start from the milestone tip
+
+
+class DocUpdate(BaseModel):
+    content: str
+
+
+class ChatMessage(BaseModel):
+    content: str = Field(min_length=1)

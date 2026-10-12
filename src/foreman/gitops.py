@@ -180,3 +180,47 @@ def merge_task(project_id: int, task_id: int, title: str) -> None:
 
 def push(project_id: int, repo_url: str, branch: str) -> None:
     git("push", "--quiet", "origin", branch, cwd=repo_dir(project_id), auth_url=repo_url)
+
+
+def head_commit(project_id: int) -> str:
+    return git("rev-parse", "HEAD", cwd=repo_dir(project_id)).strip()
+
+
+def read_repo_file(project_id: int, rel: str) -> str:
+    path = repo_dir(project_id) / rel
+    try:
+        return path.read_text(errors="replace")
+    except OSError:
+        return ""
+
+
+def safe_rel_path(rel: str) -> str:
+    """Normalise a repo-relative path; reject absolute paths and escapes."""
+    from pathlib import PurePosixPath
+
+    p = PurePosixPath(rel.strip())
+    if p.is_absolute() or not p.parts or ".." in p.parts or p.parts[0] == ".git":
+        raise ValueError(f"unsafe path: {rel!r}")
+    return str(p)
+
+
+def write_and_commit(project_id: int, files: dict[str, str], message: str) -> str:
+    """Write files into the main clone (milestone branch) and commit them.
+
+    Returns the new commit sha, or the current HEAD if nothing changed.
+    """
+    repo = repo_dir(project_id)
+    for rel, content in files.items():
+        path = repo / safe_rel_path(rel)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content if content.endswith("\n") else content + "\n")
+    git("add", "--", *[safe_rel_path(r) for r in files], cwd=repo)
+    if not _staged(repo):
+        return head_commit(project_id)
+    git("commit", "-q", "-m", message, cwd=repo)
+    return head_commit(project_id)
+
+
+def _staged(repo: Path) -> bool:
+    proc = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=repo)
+    return proc.returncode != 0

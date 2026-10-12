@@ -15,6 +15,8 @@ def now() -> float:
 
 
 class TaskState(StrEnum):
+    # Created by decomposition; waits for plan approval before it can be scheduled.
+    PROPOSED = "proposed"
     QUEUED = "queued"
     RUNNING = "running"
     VALIDATING = "validating"
@@ -31,6 +33,26 @@ class RunState(StrEnum):
     FAILED = "failed"
     STOPPED = "stopped"
     INTERRUPTED = "interrupted"
+
+
+class ProjectPhase(StrEnum):
+    SPECIFY = "specify"  # interactive spec / plan / validation with the planner
+    DECOMPOSING = "decomposing"  # planner is breaking the plan into tasks
+    PLAN_REVIEW = "plan_review"  # proposed tasks wait for approval
+    EXECUTE = "execute"  # tasks run autonomously
+
+
+class JobKind(StrEnum):
+    CHAT = "chat"
+    DECOMPOSE = "decompose"
+
+
+class JobState(StrEnum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    DONE = "done"
+    FAILED = "failed"
+    STOPPED = "stopped"
 
 
 class ControlAction(StrEnum):
@@ -53,9 +75,20 @@ class Project(SQLModel, table=True):
     # Project-wide test command run after every task (regression guard). Optional.
     test_cmd: str = ""
     executor_kind: str = "opencode"
-    # role -> {"node_id": int, "model": str}. M1 only uses "executor".
+    # role -> {"node_id": int, "model": str}. Roles: "executor", "planner".
     role_bindings: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # Optional checkpoints, e.g. {"plan_approval": true}. See core/gates.py.
     gates: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    phase: ProjectPhase = ProjectPhase.SPECIFY
+    # Specs live in the project repo under specs/<feature>/.
+    feature: str = "001-initial"
+    # Runs the project's acceptance (validation) tests; defines "done" for the project.
+    acceptance_cmd: str = ""
+    spec_approved_at: float | None = None
+    spec_commit: str = ""
+    # Task size limits enforced at decomposition (FR-3.3).
+    max_task_files: int = 3
+    context_budget_pct: int = 35
     paused: bool = False
     # When `paused` last changed; lets a late Stop avoid undoing a newer Resume.
     paused_at: float = 0.0
@@ -67,8 +100,13 @@ class Project(SQLModel, table=True):
 class Node(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     name: str
-    # OpenAI-compatible base URL, e.g. http://192.168.1.20:8080/v1
+    # "openai": any OpenAI-compatible endpoint (llama.cpp, LM Studio, Ollama, MLX, vLLM...)
+    # "anthropic": the Claude API (planner/reviewer roles only; keys never reach executors)
+    provider: str = "openai"
+    # e.g. http://192.168.1.20:8080/v1, or https://api.anthropic.com for Claude
     base_url: str
+    # Usable context window in tokens; sizes context packs.
+    context_window: int = 32768
     api_key: str = ""
     capacity: int = 1
     models: list[str] = Field(default_factory=list, sa_column=Column(JSON))
@@ -86,6 +124,15 @@ class Task(SQLModel, table=True):
     allowed_globs: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     validation_cmd: str = ""
     deps: list[int] = Field(default_factory=list, sa_column=Column(JSON))
+    # Stable name from decomposition (e.g. "T3"), used for dependencies in tasks.md.
+    key: str = ""
+    # Requirement ids from spec.md this task implements (e.g. ["FR-2.1"]).
+    req_refs: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    # Read-only files whose interfaces the task needs (signatures go in the context pack).
+    context_files: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    # Why the task breaks the size limits, if it does (blocks plan approval).
+    size_violations: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    pack_tokens: int = 0
     # Overrides of the project defaults.
     executor_kind: str = ""
     node_id: int | None = None
@@ -147,3 +194,33 @@ class SystemFlag(SQLModel, table=True):
     key: str = Field(primary_key=True)
     value: str = ""
     updated_at: float = Field(default_factory=now)
+
+
+class SpecMessage(SQLModel, table=True):
+    """One turn of the Phase 1 conversation with the planner."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    role: str  # "user" | "assistant"
+    content: str
+    # Files the planner wrote in this turn (assistant turns only).
+    files: list[str] = Field(default_factory=list, sa_column=Column(JSON))
+    job_id: int | None = None
+    ts: float = Field(default_factory=now)
+
+
+class PlannerJob(SQLModel, table=True):
+    """A planner model call, run by the orchestrator (chat turn or decomposition)."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    kind: JobKind
+    state: JobState = JobState.QUEUED
+    node_id: int | None = None
+    model: str = ""
+    error: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
+    created_at: float = Field(default_factory=now)
+    started_at: float | None = None
+    ended_at: float | None = None

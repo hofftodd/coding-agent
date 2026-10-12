@@ -11,7 +11,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
@@ -30,6 +29,8 @@ from foreman.api.schemas import (
     TaskCreate,
     TaskUpdate,
 )
+from foreman.api.spec import recheck_task_size
+from foreman.api.spec import router as spec_router
 from foreman.config import get_settings
 from foreman.core.models import (
     Control,
@@ -38,6 +39,7 @@ from foreman.core.models import (
     Event,
     Node,
     Project,
+    ProjectPhase,
     Task,
     TaskRun,
     TaskState,
@@ -55,6 +57,7 @@ from foreman.core.state import (
 )
 from foreman.db import control_session, session
 from foreman.executors import EXECUTORS
+from foreman.llm import list_models
 
 
 def require_token(request: Request) -> None:
@@ -96,6 +99,18 @@ def _task_counts(project_id: int | None) -> dict[str, int]:
     return counts
 
 
+def _check_bindings(bindings: dict[str, Any]) -> None:
+    """Executors run in sandboxes; cloud providers' keys must never get there (NFR-5)."""
+    executor = bindings.get("executor") or {}
+    if executor.get("node_id") is not None:
+        with session() as s:
+            node = s.get(Node, executor["node_id"])
+        if node is None:
+            raise HTTPException(400, "executor node not found")
+        if node.provider != "openai":
+            raise HTTPException(400, f"{node.provider} nodes can be planners, not executors")
+
+
 def _check_deps(project_id: int, deps: list[int], self_id: int | None = None) -> None:
     with session() as s:
         for d in deps:
@@ -132,13 +147,17 @@ def list_projects() -> list[dict[str, Any]]:
 async def create_project(body: ProjectCreate) -> Project:
     if body.executor_kind not in EXECUTORS:
         raise HTTPException(400, f"unknown executor {body.executor_kind}")
+    bindings = {k: v.model_dump() for k, v in body.role_bindings.items()}
+    _check_bindings(bindings)
     p = Project(
         name=body.name,
         repo_url=body.repo_url,
         milestone_branch=body.milestone_branch,
+        feature=body.feature,
+        phase=ProjectPhase.EXECUTE if body.skip_spec else ProjectPhase.SPECIFY,
         test_cmd=body.test_cmd,
         executor_kind=body.executor_kind,
-        role_bindings={k: v.model_dump() for k, v in body.role_bindings.items()},
+        role_bindings=bindings,
         push_after_merge=body.push_after_merge,
     )
     with session() as s:
@@ -183,6 +202,8 @@ def update_project(project_id: int, body: ProjectUpdate) -> Project:
         data = body.model_dump(exclude_unset=True)
         if "executor_kind" in data and data["executor_kind"] not in EXECUTORS:
             raise HTTPException(400, "unknown executor")
+        if "role_bindings" in data:
+            _check_bindings(data["role_bindings"])
         for k, v in data.items():
             setattr(p, k, v)
         s.add(p)
@@ -223,16 +244,22 @@ def list_tasks(project_id: int) -> list[Task]:
 
 @router.post("/api/projects/{project_id}/tasks", status_code=201)
 def create_task(project_id: int, body: TaskCreate) -> Task:
-    _get(Project, project_id)
+    p = _get(Project, project_id)
     if body.executor_kind and body.executor_kind not in EXECUTORS:
         raise HTTPException(400, f"unknown executor {body.executor_kind}")
     _check_deps(project_id, body.deps)
     t = Task(project_id=project_id, **body.model_dump())
+    if p.phase == ProjectPhase.PLAN_REVIEW:
+        t.state = TaskState.PROPOSED
     with session() as s:
         s.add(t)
         s.commit()
         s.refresh(t)
-    emit(project_id, t.id, "state", "queued", state="queued")
+    emit(project_id, t.id, "state", t.state.value, state=t.state.value)
+    if t.state == TaskState.PROPOSED:
+        assert t.id is not None
+        recheck_task_size(t.id)
+        return _get(Task, t.id)
     return t
 
 
@@ -268,7 +295,9 @@ def update_task(task_id: int, body: TaskUpdate) -> Task:
         s.add(t)
         s.commit()
         s.refresh(t)
-        return t
+    if t.state == TaskState.PROPOSED:
+        recheck_task_size(task_id)
+    return _get(Task, task_id)
 
 
 @router.post("/api/tasks/{task_id}/retry")
@@ -340,14 +369,10 @@ def delete_node(node_id: int) -> None:
 @router.post("/api/nodes/{node_id}/check")
 async def check_node(node_id: int) -> dict[str, Any]:
     n = _get(Node, node_id)
-    headers = {"Authorization": f"Bearer {n.api_key}"} if n.api_key else {}
     healthy, models, error = False, list(n.models), ""
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{n.base_url}/models", headers=headers)
-            r.raise_for_status()
-            found = [m.get("id") for m in r.json().get("data", []) if m.get("id")]
-            healthy, models = True, found or models
+        found = await list_models(n)
+        healthy, models = True, found or models
     except Exception as e:  # noqa: BLE001 - report any failure to the UI
         error = str(e) or type(e).__name__
     with session() as s:
@@ -498,6 +523,7 @@ def _web_dist() -> Path:
 def create_app() -> FastAPI:
     app = FastAPI(title="foreman")
     app.include_router(router)
+    app.include_router(spec_router, dependencies=[Depends(require_token)])
     dist = _web_dist()
     if dist.is_dir():
         # The dashboard shell is public; every /api call it makes carries the token.

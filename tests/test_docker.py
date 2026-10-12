@@ -147,3 +147,79 @@ async def test_opencode_executor_against_fake_model(client, origin):
         assert "Create hello.txt" in prompts  # the context pack reached the model
     finally:
         llm.stop()
+
+
+async def test_spec_to_done_with_opencode(client, origin):
+    """E2E-1: spec chat -> approve -> decomposition -> plan approval -> OpenCode in a
+    container implements the task -> validation -> merged. One fake model plays both
+    the planner and the coding agent."""
+    from sqlmodel import select
+
+    from foreman import gitops
+    from foreman.core.models import ProjectPhase, Task
+    from foreman.db import session
+    from tests.fakellm import MODEL, FakeLLM, system_text
+    from tests.helpers import project
+
+    spec_dir = "specs/001-initial"
+    chat = (
+        f"<<<FILE {spec_dir}/spec.md\n- FR-1 Create hello.txt mentioning the fake model.\n>>>\n"
+        f"<<<FILE {spec_dir}/plan.md\nOne file.\n>>>\n"
+        f"<<<FILE {spec_dir}/validation.md\n- V1 (FR-1) hello.txt exists.\n>>>\n"
+        "<<<ACCEPTANCE_CMD\ngrep -q 'fake model' hello.txt\n>>>\nDone."
+    )
+    tasks = [
+        {
+            "key": "T1",
+            "title": "Create hello.txt",
+            "req_refs": ["FR-1"],
+            "allowed_files": ["hello.txt"],
+            "context_files": [],
+            "deps": [],
+            "validation_cmd": "grep -q 'fake model' hello.txt",
+        }
+    ]
+
+    def planner(req):
+        if "Break the approved plan" in system_text(req):
+            return json.dumps(tasks)
+        return chat
+
+    llm = FakeLLM(planner=planner).start()
+    try:
+        planner_node = client.post("/api/nodes", json={"name": "p", "base_url": llm.url}).json()
+        exec_node = client.post(
+            "/api/nodes",
+            json={"name": "e", "base_url": f"http://host.docker.internal:{llm.port}/v1"},
+        ).json()
+        p = client.post(
+            "/api/projects",
+            json={
+                "name": "hello",
+                "repo_url": str(origin),
+                "executor_kind": "opencode",
+                "role_bindings": {
+                    "planner": {"node_id": planner_node["id"], "model": MODEL},
+                    "executor": {"node_id": exec_node["id"], "model": MODEL},
+                },
+            },
+        ).json()
+        pid = p["id"]
+        orch = Orchestrator()
+        client.post(f"/api/projects/{pid}/spec/messages", json={"content": "hello file"})
+        await drive(
+            orch, lambda: bool(client.get(f"/api/projects/{pid}/spec").json()["acceptance_cmd"])
+        )
+        assert client.post(f"/api/projects/{pid}/spec/approve").status_code == 200
+        await drive(orch, lambda: project(pid).phase == ProjectPhase.PLAN_REVIEW)
+        assert client.post(f"/api/projects/{pid}/plan/approve").status_code == 200
+        with session() as s:
+            t = s.exec(select(Task).where(Task.project_id == pid)).one()
+        await drive(orch, lambda: task(t.id).state in TERMINAL, timeout=180)
+        assert task(t.id).state == TaskState.DONE, task(t.id).reason
+        assert "fake model" in (gitops.repo_dir(pid) / "hello.txt").read_text()
+        # The executor's prompt was the context pack, with the requirement slice.
+        exec_prompts = json.dumps([r for r in llm.requests if r.get("tools")])
+        assert "FR-1 Create hello.txt" in exec_prompts
+    finally:
+        llm.stop()

@@ -7,7 +7,7 @@ const SHOTS = process.env.SHOTS_DIR ?? "e2e-results";
 
 async function createProject(request: APIRequestContext, name: string) {
   const r = await request.post("/api/projects", {
-    data: { name, repo_url: ORIGIN, executor_kind: "shell", test_cmd: "test -f README.md" },
+    data: { name, repo_url: ORIGIN, executor_kind: "shell", test_cmd: "test -f README.md", skip_spec: true },
   });
   expect(r.ok(), await r.text()).toBeTruthy();
   return (await r.json()) as { id: number };

@@ -17,7 +17,7 @@ from pathlib import Path
 
 from foreman import gitops
 from foreman.config import get_settings
-from foreman.core.contextpack import build_prompt
+from foreman.core.contextpack import build_pack
 from foreman.core.models import Node, Project, RunState, Task, TaskRun, TaskState
 from foreman.core.state import ACTIVE_STATES, emit, finish_run, stop_requested, transition
 from foreman.db import session
@@ -199,8 +199,23 @@ class TaskRunner:
                 node = s.get(Node, node_id)
         if executor.needs_node and (node is None or not model):
             raise StepFailed("no executor node/model configured for this project or task")
-        prompt = build_prompt(project, task, previous_failure=self._previous_failure())
-        inv = executor.prepare(project, task, node, model, self.run_dir / "ctl", prompt)
+        if executor.needs_node and node is not None and node.provider != "openai":
+            # Cloud keys must never enter a sandbox (NFR-5).
+            raise StepFailed(f"node {node.name} ({node.provider}) cannot run executors")
+        pack = await asyncio.to_thread(
+            build_pack,
+            project,
+            task,
+            clone,
+            context_window=node.context_window if node else None,
+            previous_failure=self._previous_failure(),
+        )
+        if pack.over_budget and executor.needs_node:
+            raise StepFailed(
+                f"context pack ~{pack.tokens} tokens exceeds budget {pack.budget}; split the task"
+            )
+        (self.run_dir / "context_pack.md").write_text(pack.text)
+        inv = executor.prepare(project, task, node, model, self.run_dir / "ctl", pack.text)
         self._emit(
             "system", f"executor {kind} starting" + (f" on {node.name} / {model}" if node else "")
         )

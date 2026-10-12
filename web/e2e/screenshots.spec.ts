@@ -15,7 +15,7 @@ async function project(request: APIRequestContext, name: string) {
   const repo = `${dirname(ORIGIN)}/${name}.git`;
   if (repo !== ORIGIN) execFileSync("git", ["clone", "-q", "--bare", ORIGIN, repo]);
   const r = await request.post("/api/projects", {
-    data: { name, repo_url: repo, executor_kind: "shell", test_cmd: "test -f README.md" },
+    data: { name, repo_url: repo, executor_kind: "shell", test_cmd: "test -f README.md", skip_spec: true },
   });
   expect(r.ok(), await r.text()).toBeTruthy();
   return ((await r.json()) as { id: number }).id;

@@ -1,6 +1,6 @@
 # Plan 000 — Local Agent Coding Orchestrator
 
-Status: **In progress** — M1 done · Implements: [spec.md](spec.md)
+Status: **In progress** — M1, M2 done · Implements: [spec.md](spec.md)
 
 ## 1. Stack
 
@@ -118,7 +118,7 @@ and default role bindings.
 - Supervisor + Pause/Stop/E-stop end-to-end.
 - Live task view (SSE transcript, diff, test output).
 
-### M2 — Specify & decompose
+### M2 — Specify & decompose ✅
 - Phase 1 chat with planner, doc editing, commits to `specs/`.
 - Validation tests generation; Phase 1 approval gate.
 - Decomposition with size enforcement and context packs.
@@ -197,3 +197,61 @@ Design changes made while building M1 (spec updated where relevant):
   language runtime require a custom `FOREMAN_EXECUTOR_IMAGE` for now.
 - No GitHub PR creation yet (milestone branch is merged locally and optionally
   pushed).
+
+## 9. M2 implementation notes
+
+- **Planner protocol.** The planner writes documents with full-file blocks
+  (`<<<FILE path ... >>>`) and sets the acceptance command with
+  `<<<ACCEPTANCE_CMD ... >>>`. Plain text blocks, rather than tool calls, so
+  small local models can follow it. Writes are limited to
+  `specs/<feature>/{spec,plan,validation}.md`, `tests/acceptance/**` and
+  `.foreman/Dockerfile`; anything else is refused and reported in the chat.
+  Current documents go in the system prompt on every turn, so the
+  conversation history only carries the talk (and is trimmed oldest-first to
+  fit the planner's window).
+- **Planner jobs** run inside the orchestrator, stream into the dashboard,
+  and are stoppable mid-stream: project Stop / E-stop closes the model
+  connection and nothing is applied (CAS on the job state). A failure while
+  applying results is reported, not swallowed.
+- **Providers.** `openai` = any OpenAI-compatible endpoint (raw streaming
+  HTTP). `anthropic` = Claude through the official SDK, adaptive thinking,
+  server-side refusal fallback (`fallbacks: "default"`) on models that support
+  it. Claude nodes can only be planners (NFR-5).
+- **Context packs** (`core/contextpack.py`): requirement slice by id, Python
+  interfaces via `ast` (signatures + first docstring line, no bodies), other
+  languages via signature-line matching, editable files' current contents
+  (clipped at 400 lines), validation and test commands. Tokens are estimated
+  at ~4 chars/token against `context_budget_pct` (default 35%) of the executor
+  node's `context_window`. The runner refuses to start a task whose pack is
+  over budget.
+- **Size rules** (FR-3.3): explicit files only (no wildcards), at most
+  `max_task_files` (default 3), a validation command, pack within budget,
+  requirement ids that exist in the spec, and no edits to the spec documents.
+  Violations go back to the planner (up to 3 attempts); what remains is shown
+  in plan review and blocks approval until fixed by hand.
+- **Phases:** `specify -> decomposing -> plan_review -> execute`. Tasks only
+  run in `execute`. `skip_spec` creates a project straight in `execute` for
+  hand-written tasks (this is how the M1 tests and screenshots run).
+- **Schema migration:** new columns are added to existing SQLite databases on
+  startup (`db._add_missing_columns`), so v1 data directories keep working.
+
+### Validation coverage after M2
+
+| Check | Status |
+|---|---|
+| V2.1 chat produces and commits the documents | ✅ `tests/test_spec_flow.py` |
+| V2.2 no `execute` without spec approval | ✅ approval endpoint + phase gate; tasks don't run before `execute` (projects created with `skip_spec` opt out by design) |
+| V3.1 generated tasks have all fields | ✅ `tests/test_planner.py` |
+| V3.2 over-budget tasks are split, never queued | ✅ retry loop + approval block (`test_oversized_task_is_sent_back_to_be_split`, `test_persistent_violations_block_plan_approval`) |
+| V3.3 acyclic graph | ✅ cycle detection before tasks are created |
+| V8.5 in-flight planner stream aborted on Stop | ✅ `test_stop_aborts_planner_mid_stream_and_applies_nothing` |
+| E2E-1 spec → done with a real executor | ✅ `test_spec_to_done_with_opencode` (Docker, OpenCode, fake model) and Playwright `web/e2e/spec.spec.ts` |
+
+### Known gaps carried into M3+
+
+- Network egress restriction for executor containers (FR-4.6) — still open.
+- Per-project toolchain images: the planner can write `.foreman/Dockerfile`,
+  but foreman doesn't build or use it yet.
+- Planner jobs don't count against node capacity.
+- Token counts are estimates (chars/4), not tokenizer-exact.
+- Watchdog, replanning after each task, and the remaining checkpoints are M3.
