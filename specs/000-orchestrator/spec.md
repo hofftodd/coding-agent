@@ -31,6 +31,7 @@ monitor, gate, or stop everything from the dashboard.
 - Building our own coding agent (we wrap existing ones).
 - Hosting/serving models (we consume existing inference endpoints).
 - Non-GitHub forges.
+- GitHub Issues / Projects integration (see §9).
 
 ## 4. Environment & assumptions
 
@@ -192,5 +193,12 @@ monitor, gate, or stop everything from the dashboard.
 
 ## 8. Open questions
 
-- OQ-2 Mirror tasks as GitHub Issues? (Deferred to after M2.)
-- OQ-3 Exact default models per role — decided during the M0 spike.
+- OQ-1 Exact default models per role — decided during the M0 spike.
+
+## 9. Future enhancements (out of scope for v1)
+
+- **GitHub Issues integration.** Mirror milestones as issues and tasks as
+  sub-issues with state labels and summary comments; optionally accept a
+  limited set of owner-only inbound controls (stop label, guidance comments,
+  intake issues routed to the replanner behind a gate). Would need write
+  batching for GitHub rate limits and prompt-injection safeguards.
