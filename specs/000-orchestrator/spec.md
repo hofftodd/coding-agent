@@ -1,0 +1,188 @@
+# Spec 000 — Local Agent Coding Orchestrator
+
+Status: **Draft** · Phase: 1 (Specify)
+
+## 1. Summary
+
+A self-hosted, web-based dashboard that drives a software project through a
+spec-driven SDLC using AI agents. A user adds a project tied to a GitHub repo,
+works interactively with a planner model to produce a specification,
+implementation plan and executable validation tests, then hands off to an
+orchestrator that decomposes the plan into small, context-bounded subtasks and
+executes them autonomously with local (or cloud) models until the validation
+suite passes. The orchestrator watches every subtask for runaway behaviour,
+re-reviews the whole plan after each completed subtask, and the user can
+monitor, gate, or stop everything from the dashboard.
+
+## 2. Goals
+
+- G1. Take a project from idea to "all validation tests pass" with minimal
+  human intervention, local-model first.
+- G2. Keep every executor subtask small enough to fit comfortably in a local
+  model's context window.
+- G3. Never let an agent loop, drift or burn budget unnoticed.
+- G4. Give the user full visibility and an always-working stop control.
+- G5. Keep all durable project artifacts (specs, plans, tasks) in the project's
+  own git repo, readable without this app.
+
+## 3. Non-goals (v1)
+
+- Multi-user / multi-tenant access control (single trusted user on a LAN).
+- Building our own coding agent (we wrap existing ones).
+- Hosting/serving models (we consume existing inference endpoints).
+- Non-GitHub forges.
+
+## 4. Environment & assumptions
+
+- Inference nodes (initial):
+  - **Mac Studio M5 Ultra, 256 GB** — large models; slow prompt prefill.
+  - **Mini PC with Radeon AI Pro R9700, 32 GB** — fast ~30B-class models.
+- Orchestrator, dashboard, supervisor and agent sandboxes run on the mini PC
+  and reach model servers over the LAN via OpenAI-compatible endpoints.
+- Cloud providers (Anthropic, OpenAI, …) are optional per role.
+- Docker is available on the orchestrator host.
+
+## 5. Concepts
+
+| Term | Meaning |
+|---|---|
+| Project | A GitHub repo plus its specs, plan, tasks and run history. |
+| Phase 1 (Specify) | Interactive work on spec, plan and validation tests. |
+| Phase 2 (Execute) | Autonomous decomposition, execution and replanning. |
+| Validation test | An executable test (or command) that defines part of "done". |
+| Task | A small unit of work with its own requirement slice, todos, allowed files and validation command. |
+| Context pack | The exact material handed to an executor for one task. |
+| Role | planner, reviewer, executor, escalation — each bound to a model endpoint. |
+| Node | An inference endpoint with a concurrency capacity. |
+| Gate | A configurable checkpoint where the project waits for user approval. |
+| Watchdog | Rules that detect looping, drift, scope violations and budget overruns. |
+
+## 6. Functional requirements
+
+### 6.1 Projects
+
+- FR-1.1 User can add a project by GitHub URL (existing repo) or by creating a
+  new repo; the app clones it to a local workspace.
+- FR-1.2 User can configure per project: role→model bindings, autonomy gates,
+  budgets, executor type, test command(s).
+- FR-1.3 Projects list shows phase, % validation passing, active tasks,
+  pending gates, and cloud spend.
+
+### 6.2 Phase 1 — Specify (interactive)
+
+- FR-2.1 Chat-style session with the planner model to draft and refine
+  `spec.md` (requirements), `plan.md` (architecture, milestones) and
+  `validation.md` (acceptance criteria).
+- FR-2.2 Planner proposes executable validation tests; they are committed to
+  the repo and initially expected to fail.
+- FR-2.3 Documents are editable directly in the UI; every change is a git
+  commit under `specs/<feature>/`.
+- FR-2.4 Phase 1 ends only when the user approves the spec + validation set
+  (mandatory gate).
+
+### 6.3 Decomposition
+
+- FR-3.1 Planner decomposes `plan.md` into a dependency-ordered task graph
+  written to `specs/<feature>/tasks.md` (human-readable) and the DB.
+- FR-3.2 Each task contains: id, title, requirement slice (refs into spec),
+  todos, allowed file globs, interface context, validation command, budgets,
+  dependencies.
+- FR-3.3 Size limits enforced at decomposition time (defaults, configurable):
+  ≤ 3 files touched; context pack ≤ 35% of executor's usable context; ≥ 1
+  task-local validation command. Tasks exceeding limits are split before
+  being queued.
+
+### 6.4 Execution
+
+- FR-4.1 Scheduler runs ready tasks (deps satisfied) onto nodes respecting
+  per-node concurrency slots.
+- FR-4.2 Each task runs in its own git worktree + branch inside a Docker
+  sandbox with no host credentials.
+- FR-4.3 The executor (default: OpenCode, alternative: Aider, behind a common
+  interface) receives the context pack and runs non-interactively.
+- FR-4.4 After the executor finishes, the orchestrator runs the task's
+  validation command and the full previously-passing test set; a task is done
+  only if its validation passes and no previously-passing test regresses.
+- FR-4.5 Completed task branches merge into the milestone branch; milestones
+  become GitHub PRs.
+
+### 6.5 Watchdog & escalation
+
+- FR-5.1 Per-task budgets: max iterations, tokens, wall-clock time.
+- FR-5.2 Loop detection: same failure signature (normalised error hash) or
+  same diff hash seen N times (default 3).
+- FR-5.3 Scope fence: diff touches files outside allowed globs, or diff size
+  exceeds limit.
+- FR-5.4 Regression: count of passing tests decreases.
+- FR-5.5 On trip, escalate in order: retry with fresh context → split task →
+  reassign to escalation model → park as `blocked` for the user. Every step is
+  logged with reason.
+
+### 6.6 Replanning
+
+- FR-6.1 After each completed task, the reviewer reads the plan, task graph,
+  completed diff and test status, and proposes add/remove/modify task ops,
+  each with a reason.
+- FR-6.2 Task-list changes apply automatically (unless gated); changes to
+  `spec.md` or `validation.md` always require user approval.
+- FR-6.3 Net task growth per milestone is capped (default +50% of original
+  count); exceeding it triggers a gate.
+- FR-6.4 Plan revisions are versioned and shown as diffs in the UI.
+
+### 6.7 Autonomy gates
+
+- FR-7.1 Configurable gates: task-breakdown approval, per-task merge,
+  milestone PR merge, spec-changing replan, escalation to cloud, escalation to
+  user. Always-on: Phase 1 approval, budget/spend cap reached.
+- FR-7.2 A gate puts the project in `waiting` and adds an item to the global
+  "Needs you" inbox; optional push notification (ntfy-compatible webhook).
+
+### 6.8 Stop controls
+
+- FR-8.1 **Pause** (project or task): finish current step, start nothing new.
+- FR-8.2 **Stop** (project or task): kill executor process tree / container
+  (SIGTERM, then SIGKILL after grace period ≤ 10 s) and abort in-flight model
+  requests.
+- FR-8.3 **Global E-stop**: Stop every project and halt the scheduler.
+- FR-8.4 Stop is enforced by a supervisor process independent of the
+  orchestrator loop; it must work while the orchestrator is hung.
+- FR-8.5 Stopped work is preserved (worktree, transcript, diff) with state
+  `stopped_by_user`; user can resume, edit & retry, split, or discard.
+- FR-8.6 The orchestrator checks stop flags before every side-effecting
+  action (model call, process spawn, merge, GitHub write).
+
+### 6.9 Models & nodes
+
+- FR-9.1 Register nodes as OpenAI-compatible endpoints with a concurrency
+  capacity and a list of available models.
+- FR-9.2 Cloud providers configured by API key; calls routed through LiteLLM.
+- FR-9.3 Per-project cloud spend cap; reaching it triggers the budget gate.
+- FR-9.4 Node health (reachable, loaded model, tokens/s, queue depth) shown in
+  the UI.
+
+### 6.10 Monitoring
+
+- FR-10.1 Live updates via Server-Sent Events.
+- FR-10.2 Task view: live agent transcript/tool calls, current diff, test
+  output, watchdog meters, stop button.
+- FR-10.3 Project view: task board (queued/running/review/done/blocked), plan
+  revision history, validation-passing trend.
+
+## 7. Non-functional requirements
+
+- NFR-1 Single-user, LAN-only by default; bind address configurable; optional
+  static token auth. Remote access via VPN (e.g. Tailscale) is the user's
+  concern.
+- NFR-2 Crash-safe: orchestrator restart resumes from DB state; no task left
+  silently "running".
+- NFR-3 Stop latency: executor processes terminated ≤ 10 s after Stop.
+- NFR-4 All agent actions auditable: prompts, responses, tool calls, diffs,
+  watchdog events persisted.
+- NFR-5 Secrets (GitHub token, cloud keys) never enter executor sandboxes.
+
+## 8. Open questions
+
+- OQ-1 Frontend: React + Vite (richer live UI) vs. HTMX + Jinja (single
+  language). Plan assumes React.
+- OQ-2 Mirror tasks as GitHub Issues? (Deferred to after M2.)
+- OQ-3 Exact default models per role — decided during the M0 spike.
