@@ -27,6 +27,9 @@ executor** so tests are deterministic; one optional smoke test uses real nodes.
   container environment contains no GitHub token or cloud keys. (FR-4.2, NFR-5)
 - V4.2 A task whose own validation passes but breaks a previously-passing test
   is not marked `done`. (FR-4.4)
+- V4.4 Executor containers derive from `foreman/executor-base` (`ubuntu:24.04`),
+  run as non-root, mount only the task worktree read-write, and cannot reach
+  hosts outside the allowlist. (FR-4.6)
 - V4.3 Node capacity is never exceeded under a queue of 10 ready tasks. (FR-4.1)
 
 ## V5 — Watchdog

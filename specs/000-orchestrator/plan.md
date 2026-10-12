@@ -11,9 +11,9 @@ Status: **Draft** · Implements: [spec.md](spec.md)
 | Live updates | Server-Sent Events (`sse-starlette`) |
 | Persistence | SQLite (WAL) via SQLModel / SQLAlchemy; Alembic migrations |
 | Model routing | LiteLLM (Python library) |
-| Executors | OpenCode (default), Aider — subprocess in Docker |
+| Executors | OpenCode (default), Aider — in Docker containers from `ubuntu:24.04`-based image |
 | Git / GitHub | `git` CLI (worktrees), GitHub REST via `httpx` |
-| Frontend | React + Vite + TypeScript (see OQ-1), served as static files by FastAPI |
+| Frontend | React + Vite + TypeScript, served as static files by FastAPI |
 | Tests | pytest, pytest-asyncio; Playwright for UI e2e |
 | Lint / types | ruff, mypy (strict on `core/`) |
 
@@ -68,6 +68,7 @@ src/foreman/            # working package name
   llm/router.py         # LiteLLM wrapper, role→endpoint, spend tracking
   gitops/               # clone, worktree, merge, PR
   supervisor/main.py
+docker/executor-base/   # Dockerfile for foreman/executor-base (ubuntu:24.04)
 web/                    # React app
 tests/
 specs/
