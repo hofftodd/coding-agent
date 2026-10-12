@@ -1,0 +1,182 @@
+"""Git operations on the host side.
+
+Layout per project (under FOREMAN_DATA_DIR/projects/<id>/):
+    repo/            main clone; the milestone branch is checked out here
+    tasks/<task_id>/ isolated local clone for one task, on branch foreman/task-<id>
+
+Task clones are standalone (own .git directory, no remote) rather than git
+worktrees: a worktree's .git file points at an absolute host path, which would
+force us to mount the main repository - and its config/credentials - into
+the executor container.
+"""
+
+from __future__ import annotations
+
+import base64
+import fnmatch
+import subprocess
+from pathlib import Path
+
+from foreman.config import get_settings
+
+# Marks the commit a task clone started from.
+BASE_REF = "refs/foreman/base"
+
+GIT_IDENTITY = [
+    "-c",
+    "user.name=foreman",
+    "-c",
+    "user.email=foreman@localhost",
+    # Task clones are owned by the container user, not necessarily by us.
+    "-c",
+    "safe.directory=*",
+]
+
+
+class GitError(RuntimeError):
+    pass
+
+
+def _auth_args(url: str) -> list[str]:
+    token = get_settings().github_token
+    if not token or not url.startswith("https://github.com/"):
+        return []
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    # Passed per command so the token is never written to .git/config.
+    return ["-c", f"http.https://github.com/.extraheader=AUTHORIZATION: basic {basic}"]
+
+
+def git(*args: str, cwd: Path | None = None, auth_url: str = "", check: bool = True) -> str:
+    cmd = ["git", *GIT_IDENTITY, *(_auth_args(auth_url) if auth_url else []), *args]
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if check and proc.returncode != 0:
+        safe = [a if "extraheader" not in a else "<auth>" for a in cmd]
+        raise GitError(f"{' '.join(safe)} failed: {proc.stderr.strip() or proc.stdout.strip()}")
+    return proc.stdout
+
+
+def project_dir(project_id: int) -> Path:
+    return get_settings().projects_dir / str(project_id)
+
+
+def repo_dir(project_id: int) -> Path:
+    return project_dir(project_id) / "repo"
+
+
+def task_dir(project_id: int, task_id: int) -> Path:
+    return project_dir(project_id) / "tasks" / str(task_id)
+
+
+def task_branch(task_id: int) -> str:
+    return f"foreman/task-{task_id}"
+
+
+def clone_project(project_id: int, repo_url: str, milestone_branch: str) -> str:
+    """Clone the repo and check out the milestone branch. Returns the default branch."""
+    dest = repo_dir(project_id)
+    if not (dest / ".git").exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        git("clone", "--", repo_url, str(dest), auth_url=repo_url)
+    head = git("symbolic-ref", "--short", "-q", "HEAD", cwd=dest, check=False).strip()
+    default_branch = head or "main"
+    if not has_commits(dest):
+        # Empty repository: create a root commit so branches have something to point at.
+        git("commit", "--allow-empty", "-m", "Initial commit (foreman)", cwd=dest)
+    exists = git("rev-parse", "--verify", "-q", milestone_branch, cwd=dest, check=False).strip()
+    if exists:
+        git("checkout", milestone_branch, cwd=dest)
+    else:
+        git("checkout", "-b", milestone_branch, cwd=dest)
+    return default_branch
+
+
+def has_commits(repo: Path) -> bool:
+    return bool(git("rev-parse", "--verify", "-q", "HEAD", cwd=repo, check=False).strip())
+
+
+def prepare_task_clone(project_id: int, task_id: int, milestone_branch: str) -> Path:
+    """Create (or reuse) the task's isolated clone. Reuse keeps prior partial work."""
+    dest = task_dir(project_id, task_id)
+    if (dest / ".git").exists():
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    repo = repo_dir(project_id)
+    git("clone", "--quiet", "--no-hardlinks", "--branch", milestone_branch, str(repo), str(dest))
+    git("remote", "remove", "origin", cwd=dest)
+    git("checkout", "-b", task_branch(task_id), cwd=dest)
+    git("update-ref", BASE_REF, "HEAD", cwd=dest)
+    return dest
+
+
+def reset_task_clone(project_id: int, task_id: int) -> None:
+    import shutil
+
+    shutil.rmtree(task_dir(project_id, task_id), ignore_errors=True)
+
+
+def commit_all(path: Path, message: str) -> bool:
+    """Commit any pending changes in the task clone. Returns True if a commit was made."""
+    git("add", "-A", cwd=path)
+    if not git("status", "--porcelain", cwd=path).strip():
+        return False
+    git("commit", "-q", "-m", message, cwd=path)
+    return True
+
+
+def _read(*args: str, cwd: Path) -> str:
+    """Read-only git command that never takes optional locks (safe while an agent works)."""
+    return git("--no-optional-locks", *args, cwd=cwd, check=False)
+
+
+def changed_files(path: Path) -> list[str]:
+    """Files changed in the task clone (committed or not) since the task started."""
+    out = _read("diff", "--name-only", BASE_REF, cwd=path)
+    untracked = _read("ls-files", "--others", "--exclude-standard", cwd=path)
+    return sorted({f for f in (out + untracked).splitlines() if f})
+
+
+def diff(path: Path) -> str:
+    """Unified diff of the task's changes since it started, including new files."""
+    if not (path / ".git").exists():
+        return ""
+    parts = [_read("diff", BASE_REF, cwd=path)]
+    for f in _read("ls-files", "--others", "--exclude-standard", cwd=path).splitlines():
+        if f:
+            parts.append(_read("diff", "--no-index", "--", "/dev/null", f, cwd=path))
+    return "".join(parts)
+
+
+def out_of_scope(files: list[str], globs: list[str]) -> list[str]:
+    if not globs:
+        return []
+    return [f for f in files if not any(fnmatch.fnmatch(f, g) for g in globs)]
+
+
+def merge_task(project_id: int, task_id: int, title: str) -> None:
+    """Merge the task branch into the milestone branch in the main clone."""
+    repo = repo_dir(project_id)
+    branch = task_branch(task_id)
+    # Push from the task clone rather than fetch into the main repo: the task clone is
+    # owned by the container user, and git refuses to serve fetches from a repository
+    # owned by someone else.
+    git(
+        "push",
+        "--quiet",
+        "--force",
+        str(repo),
+        f"{branch}:{branch}",
+        cwd=task_dir(project_id, task_id),
+    )
+    proc = subprocess.run(
+        ["git", *GIT_IDENTITY, "merge", "--no-ff", "-m", f"Merge task {task_id}: {title}", branch],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        git("merge", "--abort", cwd=repo, check=False)
+        raise GitError(f"merge conflict: {proc.stdout.strip()} {proc.stderr.strip()}")
+
+
+def push(project_id: int, repo_url: str, branch: str) -> None:
+    git("push", "--quiet", "origin", branch, cwd=repo_dir(project_id), auth_url=repo_url)

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+/data/
+web/node_modules/
+web/dist/
+web/e2e-results/
+web/test-results/
+*.tsbuildinfo

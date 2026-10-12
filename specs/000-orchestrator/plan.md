@@ -1,6 +1,6 @@
 # Plan 000 — Local Agent Coding Orchestrator
 
-Status: **Draft** · Implements: [spec.md](spec.md)
+Status: **In progress** — M1 done · Implements: [spec.md](spec.md)
 
 ## 1. Stack
 
@@ -105,13 +105,13 @@ over-budget ⇒ the task is returned to the planner to split.
 
 ## 6. Milestones
 
-### M0 — Spike (no app code)
+### M0 — Spike (no app code) — skipped by decision; model choice deferred to real use
 Manually run Spec Kit-style spec → decomposition → OpenCode/Aider on the R9700
 and Mac against a toy repo. Record: which models follow tool protocols, real
 usable context, tokens/s, typical failure modes. Output: `specs/000-orchestrator/spike-notes.md`
 and default role bindings.
 
-### M1 — Walking skeleton + stop
+### M1 — Walking skeleton + stop ✅
 - Project add/clone, node registry, role bindings.
 - Manual task creation; sequential execution on one node via OpenCode in Docker.
 - Validation run, merge to milestone branch.
@@ -144,3 +144,56 @@ and default role bindings.
 | Replanner churn | Growth cap, reasons required, spec-change gate |
 | Validation tests themselves wrong | Phase 1 human approval; tests changes always gated |
 | Executor CLI interface drift | `Executor` protocol + pinned versions + contract tests |
+
+## 8. M1 implementation notes
+
+Design changes made while building M1 (spec updated where relevant):
+
+- **Task clones instead of git worktrees.** A worktree's `.git` file points at
+  an absolute host path, which would force mounting the main repository (and
+  its config) into the container. Each task gets a standalone local clone with
+  no remote; the orchestrator pushes the task branch back into the main clone
+  to merge.
+- **Two databases.** Stop requests and the E-stop flag live in `control.db`,
+  which the orchestrator only reads. Found by the frozen-orchestrator test
+  (V8.2): an orchestrator stopped mid-transaction holds `foreman.db`'s write
+  lock, which previously blocked recording a Stop at all.
+- **Kill first, record second.** The supervisor kills processes before writing
+  any state, and the runner consults `control.db` before advancing or failing
+  a task, so a stop is never reported as a failure.
+- **Heartbeats are files** (mtime), so liveness never contends for a lock.
+- **Containers are labelled with an instance id** so the orphan sweep never
+  touches another foreman installation's containers on the same host.
+- **One active task per project** in M1 (tasks merge into one milestone
+  branch); parallelism comes from multiple projects and node capacity.
+- **Scope fence implemented early** (it was planned for M3): changes outside a
+  task's allowed globs fail the task.
+
+### Validation coverage after M1
+
+| Check | Status |
+|---|---|
+| V1.1, V1.2 projects & config | ✅ `tests/test_api.py` |
+| V3.3 deps respected | ✅ `test_dependencies_run_in_order` |
+| V4.1 own clone/branch/container, no secrets | ✅ `tests/test_docker.py` |
+| V4.2 regression blocks done | ✅ (exit-code based; per-test regression counting is M3) |
+| V4.3 node capacity | ✅ `test_node_capacity_respected` |
+| V4.4 image, non-root, mounts | ✅ — **egress allowlist not yet implemented** (containers use the default bridge network) |
+| V5.2 scope fence | ✅ `test_scope_fence` |
+| V5.3 time budget | ✅ `test_timeout` (iteration/token budgets: M3) |
+| V8.1–V8.5 stop controls | ✅ `tests/test_stop.py` (real processes), `tests/test_docker.py`, Playwright `web/e2e` |
+| V9.1 crash recovery | ✅ `test_orchestrator_crash_recovery` |
+| E2E-2 (stop from UI) | ✅ `scripts/e2e.sh` |
+| V2.x, V3.1–V3.2, V5.1, V5.4, V6–V7, V10, E2E-1 | M2–M4 |
+
+### Known gaps carried into M2+
+
+- Network egress restriction for executor containers (FR-4.6).
+- The node's API key (if any) is written into the OpenCode config inside the
+  run's read-only control mount; cloud keys must go through a host-side proxy
+  before cloud executors are allowed (NFR-5).
+- Per-project toolchain images (`.foreman/Dockerfile`) are not built yet; the
+  base image only has git + OpenCode, so validation commands that need a
+  language runtime require a custom `FOREMAN_EXECUTOR_IMAGE` for now.
+- No GitHub PR creation yet (milestone branch is merged locally and optionally
+  pushed).

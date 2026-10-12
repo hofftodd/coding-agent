@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+# End-to-end: start the whole stack against a throwaway data dir and a local bare
+# repo standing in for GitHub, then drive the dashboard with Playwright.
+#
+#   scripts/e2e.sh                  # docker runtime (needs foreman/executor-base)
+#   FOREMAN_RUNTIME=local scripts/e2e.sh
+set -euo pipefail
+
+root="$(cd "$(dirname "$0")/.." && pwd)"
+work="$(mktemp -d)"
+port="${FOREMAN_PORT:-8711}"
+trap 'kill "${pid:-0}" 2>/dev/null || true; wait "${pid:-0}" 2>/dev/null || true; rm -rf "$work"' EXIT
+
+# Origin repo
+git init -q --bare -b main "$work/origin.git"
+git init -q -b main "$work/seed"
+echo "# e2e" > "$work/seed/README.md"
+mkdir -p "$work/seed/src" && echo "X = 1" > "$work/seed/src/app.py"
+git -C "$work/seed" add -A
+git -C "$work/seed" -c user.name=e2e -c user.email=e2e@local commit -qm init
+git -C "$work/seed" push -q "$work/origin.git" main
+
+(cd "$root/web" && npm run build >/dev/null)
+
+export FOREMAN_DATA_DIR="$work/data" FOREMAN_PORT="$port" FOREMAN_POLL_INTERVAL_S=0.25
+export FOREMAN_RUNTIME="${FOREMAN_RUNTIME:-docker}"
+(cd "$root" && exec uv run foreman up) > "$work/foreman.log" 2>&1 &
+pid=$!
+
+for _ in $(seq 1 60); do
+  curl -sf "http://127.0.0.1:$port/api/system" >/dev/null && break
+  sleep 0.5
+done
+
+cd "$root/web"
+FOREMAN_URL="http://127.0.0.1:$port" ORIGIN_REPO="$work/origin.git" \
+  SHOTS_DIR="${SHOTS_DIR:-$root/web/e2e-results}" npx playwright test "$@" \
+  || { echo "--- foreman log ---"; tail -50 "$work/foreman.log"; exit 1; }
