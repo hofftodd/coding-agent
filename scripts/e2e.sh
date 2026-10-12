@@ -11,14 +11,16 @@ work="$(mktemp -d)"
 port="${FOREMAN_PORT:-8711}"
 trap 'kill "${pid:-0}" 2>/dev/null || true; wait "${pid:-0}" 2>/dev/null || true; rm -rf "$work"' EXIT
 
-# Origin repo
-git init -q --bare -b main "$work/origin.git"
+# Origin repo (override the location with ORIGIN_REPO, e.g. for nicer screenshots)
+origin="${ORIGIN_REPO:-$work/origin.git}"
+rm -rf "$origin" && mkdir -p "$(dirname "$origin")"
+git init -q --bare -b main "$origin"
 git init -q -b main "$work/seed"
 echo "# e2e" > "$work/seed/README.md"
 mkdir -p "$work/seed/src" && echo "X = 1" > "$work/seed/src/app.py"
 git -C "$work/seed" add -A
 git -C "$work/seed" -c user.name=e2e -c user.email=e2e@local commit -qm init
-git -C "$work/seed" push -q "$work/origin.git" main
+git -C "$work/seed" push -q "$origin" main
 
 (cd "$root/web" && npm run build >/dev/null)
 
@@ -33,6 +35,6 @@ for _ in $(seq 1 60); do
 done
 
 cd "$root/web"
-FOREMAN_URL="http://127.0.0.1:$port" ORIGIN_REPO="$work/origin.git" \
+FOREMAN_URL="http://127.0.0.1:$port" ORIGIN_REPO="$origin" \
   SHOTS_DIR="${SHOTS_DIR:-$root/web/e2e-results}" npx playwright test "$@" \
   || { echo "--- foreman log ---"; tail -50 "$work/foreman.log"; exit 1; }

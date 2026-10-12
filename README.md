@@ -26,6 +26,39 @@ acceptance criteria live in [`specs/000-orchestrator/`](specs/000-orchestrator/)
   separate supervisor process that works even if the orchestrator hangs.
   Stopped work is preserved and can be retried or discarded.
 
+## Screenshots
+
+Captured from the running app (`scripts/screenshots.sh`). The tasks here use
+the scripted `shell` executor to imitate an agent, so the scene is
+reproducible.
+
+**Project board:** tasks flow from queued to done; dependencies and failure
+reasons are shown on each card.
+
+![Project board](docs/screenshots/project-board.png)
+
+**Live log** of a running task, streamed from its container. This one is
+stuck re-running the same failing test...
+
+![Live log of a running task](docs/screenshots/task-live-log.png)
+
+**...so it gets the big red button.** The agent is killed within seconds;
+its partial work is kept and can be retried or discarded.
+
+![Task stopped by the user](docs/screenshots/task-stopped.png)
+
+**Diff** of a finished task against the milestone branch.
+
+![Task diff](docs/screenshots/task-diff.png)
+
+**E-STOP ALL** kills every running agent and blocks new work until cleared.
+
+![Emergency stop active](docs/screenshots/estop.png)
+
+**Projects overview.**
+
+![Projects overview](docs/screenshots/projects.png)
+
 ## Quick start
 
 Requirements: Python 3.12+, [uv](https://docs.astral.sh/uv/), Node 20+, Docker, git.
@@ -83,5 +116,6 @@ uv run pytest -q                 # unit, integration, multi-process stop tests;
 uv run ruff check src tests && uv run mypy src
 (cd web && npm run dev)          # dashboard with hot reload, proxies /api to :8700
 scripts/e2e.sh                   # full stack + Playwright browser tests
+scripts/screenshots.sh           # regenerate docs/screenshots/
 python -m tests.fakellm 8999     # scripted OpenAI-compatible model for demos
 ```
