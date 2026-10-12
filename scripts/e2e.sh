@@ -9,7 +9,8 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 work="$(mktemp -d)"
 port="${FOREMAN_PORT:-8711}"
-trap 'kill "${pid:-0}" 2>/dev/null || true; wait "${pid:-0}" 2>/dev/null || true; rm -rf "$work"' EXIT
+llm_port="${FAKE_LLM_PORT:-8712}"
+trap 'kill "${pid:-0}" "${llm_pid:-0}" 2>/dev/null || true; wait "${pid:-0}" 2>/dev/null || true; rm -rf "$work"' EXIT
 
 # Origin repo (override the location with ORIGIN_REPO, e.g. for nicer screenshots)
 origin="${ORIGIN_REPO:-$work/origin.git}"
@@ -28,6 +29,9 @@ export FOREMAN_DATA_DIR="$work/data" FOREMAN_PORT="$port" FOREMAN_POLL_INTERVAL_
 export FOREMAN_RUNTIME="${FOREMAN_RUNTIME:-docker}"
 (cd "$root" && exec uv run foreman up) > "$work/foreman.log" 2>&1 &
 pid=$!
+# Scripted planner model for the Phase 1 tests.
+(cd "$root" && exec uv run python -m tests.fakellm "$llm_port" --demo) > "$work/fakellm.log" 2>&1 &
+llm_pid=$!
 
 for _ in $(seq 1 60); do
   curl -sf "http://127.0.0.1:$port/api/system" >/dev/null && break
@@ -35,6 +39,6 @@ for _ in $(seq 1 60); do
 done
 
 cd "$root/web"
-FOREMAN_URL="http://127.0.0.1:$port" ORIGIN_REPO="$origin" \
+FOREMAN_URL="http://127.0.0.1:$port" ORIGIN_REPO="$origin" FAKE_LLM_URL="http://127.0.0.1:$llm_port/v1" \
   SHOTS_DIR="${SHOTS_DIR:-$root/web/e2e-results}" npx playwright test "$@" \
   || { echo "--- foreman log ---"; tail -50 "$work/foreman.log"; exit 1; }

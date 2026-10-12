@@ -198,3 +198,55 @@ select[multiple] { min-height: 90px; }
 .details pre.block { background: var(--code-bg); padding: 8px; border-radius: 6px; margin: 0; }
 .runs { width: 100%; border-collapse: collapse; font-size: 13px; }
 .runs th, .runs td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+
+/* phases */
+.stepper { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.step {
+  font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border);
+  color: var(--muted); background: var(--surface);
+}
+.step.done { color: var(--ok); border-color: var(--ok); }
+.step.current { color: white; background: var(--accent); border-color: var(--accent); font-weight: 600; }
+.phase-specify, .phase-decomposing { background: var(--surface-2); color: var(--accent); }
+.phase-plan_review { background: var(--warn); color: white; }
+.phase-execute { background: var(--accent); color: white; }
+.state-proposed { color: var(--warn); }
+
+/* spec workspace */
+.spec-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr); gap: 16px; align-items: start; }
+@media (max-width: 1000px) { .spec-grid { grid-template-columns: 1fr; } }
+.spec-side { display: flex; flex-direction: column; }
+.chat { display: flex; flex-direction: column; height: calc(100vh - 230px); min-height: 420px; }
+.chat-log { flex: 1; overflow: auto; display: flex; flex-direction: column; gap: 10px; padding-right: 4px; }
+.chat-empty { margin: auto; max-width: 360px; text-align: center; line-height: 1.5; }
+.msg { border-radius: 10px; padding: 8px 12px; max-width: 92%; }
+.msg-user { align-self: flex-end; background: var(--accent); color: white; }
+.msg-user .msg-meta { color: rgba(255, 255, 255, 0.8); }
+.msg-assistant { align-self: flex-start; background: var(--surface-2); }
+.msg.streaming { border: 1px dashed var(--accent); }
+.msg-meta { font-size: 11px; color: var(--muted); margin-bottom: 3px; }
+.msg-body { white-space: pre-wrap; word-break: break-word; line-height: 1.45; }
+.msg-files { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.msg-files code { font-size: 11px; background: var(--surface); padding: 1px 6px; border-radius: 4px; }
+.chat-input { display: flex; gap: 8px; margin-top: 10px; align-items: flex-end; }
+.chat-input textarea { flex: 1; }
+.docs .tabs { flex-wrap: wrap; }
+.docs .tabs .mono { margin-left: auto; }
+pre.doc {
+  white-space: pre-wrap; word-break: break-word; background: var(--code-bg); border-radius: 8px;
+  padding: 12px; margin: 0; max-height: 55vh; overflow: auto; font-size: 13px; line-height: 1.5;
+}
+.doc-empty { padding: 24px; text-align: center; }
+.doc-editor { width: 100%; min-height: 50vh; font-size: 13px; line-height: 1.5; }
+.docs .actions, .approve .actions { margin-top: 8px; }
+.approve { display: flex; flex-direction: column; gap: 10px; }
+.row .grow { flex: 1; }
+
+/* plan review */
+.review-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+.review-head p { margin: 0; max-width: 640px; }
+.proposed h3 { margin: 0; }
+.proposed.too-big { border-color: var(--bad); }
+.proposed-body p { margin: 6px 0; }
+.proposed-body .small > div { margin: 2px 0; }
+.task-editor { margin-top: 10px; }

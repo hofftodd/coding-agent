@@ -5,6 +5,13 @@ import { ErrorNote, Field } from "../components";
 import { usePoll } from "../hooks";
 import type { Node, Project, SystemInfo } from "../types";
 
+const PHASE_LABEL: Record<Project["phase"], string> = {
+  specify: "specifying",
+  decomposing: "planning",
+  plan_review: "plan review",
+  execute: "executing",
+};
+
 function Counts({ p }: { p: Project }) {
   const c = p.task_counts ?? {};
   const active = (c.running ?? 0) + (c.validating ?? 0);
@@ -30,12 +37,16 @@ function AddProject({ onDone }: { onDone: (p: Project) => void }) {
     executor_kind: "opencode",
     node_id: "",
     model: "",
+    planner_node_id: "",
+    planner_model: "",
     push_after_merge: false,
+    skip_spec: false,
   });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const set = (k: string, v: unknown) => setForm((f) => ({ ...f, [k]: v }));
   const node = nodes?.find((n) => String(n.id) === form.node_id);
+  const plannerNode = nodes?.find((n) => String(n.id) === form.planner_node_id);
 
   return (
     <form
@@ -52,9 +63,13 @@ function AddProject({ onDone }: { onDone: (p: Project) => void }) {
             test_cmd: form.test_cmd,
             executor_kind: form.executor_kind,
             push_after_merge: form.push_after_merge,
-            role_bindings: form.node_id
-              ? { executor: { node_id: Number(form.node_id), model: form.model } }
-              : {},
+            skip_spec: form.skip_spec,
+            role_bindings: {
+              ...(form.node_id ? { executor: { node_id: Number(form.node_id), model: form.model } } : {}),
+              ...(form.planner_node_id
+                ? { planner: { node_id: Number(form.planner_node_id), model: form.planner_model } }
+                : {}),
+            },
           });
           onDone(p);
         } catch (err) {
@@ -85,10 +100,26 @@ function AddProject({ onDone }: { onDone: (p: Project) => void }) {
             ))}
           </select>
         </Field>
-        <Field label="Executor node">
-          <select value={form.node_id} onChange={(e) => set("node_id", e.target.value)}>
+        <Field label="Planner node" hint="Writes the spec with you and breaks it into tasks (local or Claude)">
+          <select value={form.planner_node_id} onChange={(e) => set("planner_node_id", e.target.value)}>
             <option value="">— none —</option>
             {nodes?.map((n) => (
+              <option key={n.id} value={n.id}>
+                {n.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Planner model">
+          <input list="planner-models" value={form.planner_model} onChange={(e) => set("planner_model", e.target.value)} />
+          <datalist id="planner-models">
+            {plannerNode?.models.map((m) => <option key={m} value={m} />)}
+          </datalist>
+        </Field>
+        <Field label="Executor node" hint="Runs the coding agent; must be local / OpenAI-compatible">
+          <select value={form.node_id} onChange={(e) => set("node_id", e.target.value)}>
+            <option value="">— none —</option>
+            {nodes?.filter((n) => n.provider === "openai").map((n) => (
               <option key={n.id} value={n.id}>
                 {n.name}
               </option>
@@ -103,6 +134,9 @@ function AddProject({ onDone }: { onDone: (p: Project) => void }) {
         </Field>
         <Field label="Push milestone branch after each merge">
           <input type="checkbox" checked={form.push_after_merge} onChange={(e) => set("push_after_merge", e.target.checked)} />
+        </Field>
+        <Field label="Skip the spec phase" hint="Add tasks by hand instead of planning with the planner">
+          <input type="checkbox" checked={form.skip_spec} onChange={(e) => set("skip_spec", e.target.checked)} />
         </Field>
       </div>
       <ErrorNote error={error} />
@@ -134,7 +168,10 @@ export default function ProjectsPage() {
           <Link key={p.id} to={`/projects/${p.id}`} className="card project-card">
             <div className="row">
               <h3>{p.name}</h3>
-              {p.paused && <span className="badge state-paused">paused</span>}
+              <span>
+                <span className={`badge phase-${p.phase}`}>{PHASE_LABEL[p.phase]}</span>{" "}
+                {p.paused && <span className="badge state-paused">paused</span>}
+              </span>
             </div>
             <div className="muted mono small">{p.repo_url}</div>
             <div className="muted small">→ {p.milestone_branch}</div>

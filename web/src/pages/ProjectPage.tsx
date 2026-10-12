@@ -3,7 +3,9 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { control, del, patch, post } from "../api";
 import { ActionButton, ErrorNote, EventLog, Field, StateBadge, StopButton, lines } from "../components";
 import { useEventStream, usePoll } from "../hooks";
-import type { Node, Project, SystemInfo, Task, TaskState } from "../types";
+import type { Node, Project, ProjectPhase, SystemInfo, Task, TaskState } from "../types";
+import PlanReview from "./PlanReview";
+import SpecWorkspace from "./SpecWorkspace";
 
 const COLUMNS: { title: string; states: TaskState[] }[] = [
   { title: "Queued", states: ["queued"] },
@@ -113,19 +115,66 @@ function AddTask({ project, tasks, onDone }: { project: Project; tasks: Task[]; 
   );
 }
 
+function RoleFields({
+  label,
+  nodes,
+  binding,
+  onChange,
+  listId,
+  allowCloud,
+}: {
+  label: string;
+  nodes: Node[] | null;
+  binding: { node_id: string; model: string };
+  onChange: (b: { node_id: string; model: string }) => void;
+  listId: string;
+  allowCloud: boolean;
+}) {
+  const node = nodes?.find((n) => String(n.id) === binding.node_id);
+  return (
+    <>
+      <Field label={`${label} node`}>
+        <select value={binding.node_id} onChange={(e) => onChange({ ...binding, node_id: e.target.value })}>
+          <option value="">— none —</option>
+          {nodes
+            ?.filter((n) => allowCloud || n.provider === "openai")
+            .map((n) => (
+              <option key={n.id} value={n.id}>
+                {n.name} {n.provider === "anthropic" ? "(Claude)" : ""}
+              </option>
+            ))}
+        </select>
+      </Field>
+      <Field label={`${label} model`}>
+        <input list={listId} value={binding.model} onChange={(e) => onChange({ ...binding, model: e.target.value })} />
+        <datalist id={listId}>{node?.models.map((m) => <option key={m} value={m} />)}</datalist>
+      </Field>
+    </>
+  );
+}
+
 function Settings({ project, onSaved }: { project: Project; onSaved: () => void }) {
   const { data: nodes } = usePoll<Node[]>("/api/nodes", 10000);
-  const binding = project.role_bindings.executor ?? { node_id: null, model: "" };
+  const b = (role: string) => {
+    const x = project.role_bindings[role] ?? { node_id: null, model: "" };
+    return { node_id: x.node_id ? String(x.node_id) : "", model: x.model };
+  };
+  const [executor, setExecutor] = useState(b("executor"));
+  const [planner, setPlanner] = useState(b("planner"));
   const [f, setF] = useState({
     test_cmd: project.test_cmd,
     executor_kind: project.executor_kind,
-    node_id: binding.node_id ? String(binding.node_id) : "",
-    model: binding.model,
     push_after_merge: project.push_after_merge,
+    max_task_files: project.max_task_files,
+    context_budget_pct: project.context_budget_pct,
+    plan_approval: project.gates?.plan_approval !== false,
   });
   const [error, setError] = useState("");
   const set = (k: string, v: unknown) => setF((x) => ({ ...x, [k]: v }));
-  const node = nodes?.find((n) => String(n.id) === f.node_id);
+  const toBinding = (x: { node_id: string; model: string }) => ({
+    node_id: x.node_id ? Number(x.node_id) : null,
+    model: x.model,
+  });
   return (
     <form
       className="card form"
@@ -136,9 +185,13 @@ function Settings({ project, onSaved }: { project: Project; onSaved: () => void 
             test_cmd: f.test_cmd,
             executor_kind: f.executor_kind,
             push_after_merge: f.push_after_merge,
+            max_task_files: f.max_task_files,
+            context_budget_pct: f.context_budget_pct,
+            gates: { ...project.gates, plan_approval: f.plan_approval },
             role_bindings: {
               ...project.role_bindings,
-              executor: { node_id: f.node_id ? Number(f.node_id) : null, model: f.model },
+              executor: toBinding(executor),
+              planner: toBinding(planner),
             },
           });
           onSaved();
@@ -148,25 +201,33 @@ function Settings({ project, onSaved }: { project: Project; onSaved: () => void 
       }}
     >
       <h2>Settings</h2>
+      <h3>Models</h3>
       <div className="grid2">
-        <Field label="Project test command">
-          <input className="mono" value={f.test_cmd} onChange={(e) => set("test_cmd", e.target.value)} />
-        </Field>
+        <RoleFields label="Planner" nodes={nodes} binding={planner} onChange={setPlanner} listId="planner-models" allowCloud />
+        <RoleFields label="Executor" nodes={nodes} binding={executor} onChange={setExecutor} listId="executor-models" allowCloud={false} />
         <Field label="Executor">
           <select value={f.executor_kind} onChange={(e) => set("executor_kind", e.target.value)}>
             <option>opencode</option>
             <option>shell</option>
           </select>
         </Field>
-        <Field label="Executor node">
-          <select value={f.node_id} onChange={(e) => set("node_id", e.target.value)}>
-            <option value="">— none —</option>
-            {nodes?.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
-          </select>
+      </div>
+      <h3>Tasks</h3>
+      <div className="grid2">
+        <Field label="Max files per task">
+          <input type="number" min={1} max={20} value={f.max_task_files} onChange={(e) => set("max_task_files", Number(e.target.value))} />
         </Field>
-        <Field label="Executor model">
-          <input list="settings-models" value={f.model} onChange={(e) => set("model", e.target.value)} />
-          <datalist id="settings-models">{node?.models.map((m) => <option key={m} value={m} />)}</datalist>
+        <Field label="Context budget (% of executor window)">
+          <input type="number" min={5} max={90} value={f.context_budget_pct} onChange={(e) => set("context_budget_pct", Number(e.target.value))} />
+        </Field>
+        <Field label="Project test command" hint="Runs after every task to catch regressions">
+          <input className="mono" value={f.test_cmd} onChange={(e) => set("test_cmd", e.target.value)} />
+        </Field>
+      </div>
+      <h3>Checkpoints</h3>
+      <div className="grid2">
+        <Field label="Review the task breakdown before it runs">
+          <input type="checkbox" checked={f.plan_approval} onChange={(e) => set("plan_approval", e.target.checked)} />
         </Field>
         <Field label="Push milestone branch after each merge">
           <input type="checkbox" checked={f.push_after_merge} onChange={(e) => set("push_after_merge", e.target.checked)} />
@@ -175,6 +236,27 @@ function Settings({ project, onSaved }: { project: Project; onSaved: () => void 
       <ErrorNote error={error} />
       <button className="btn primary">Save</button>
     </form>
+  );
+}
+
+const PHASES: { phase: ProjectPhase; label: string }[] = [
+  { phase: "specify", label: "1. Specify" },
+  { phase: "plan_review", label: "2. Review plan" },
+  { phase: "execute", label: "3. Execute" },
+];
+
+function PhaseStepper({ phase }: { phase: ProjectPhase }) {
+  const current = phase === "decomposing" ? "plan_review" : phase;
+  const idx = PHASES.findIndex((p) => p.phase === current);
+  return (
+    <div className="stepper">
+      {PHASES.map((p, i) => (
+        <span key={p.phase} className={`step ${i < idx ? "done" : i === idx ? "current" : ""}`}>
+          {p.label}
+          {p.phase === "plan_review" && phase === "decomposing" && " (planning…)"}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -204,11 +286,14 @@ export default function ProjectPage() {
           <div className="muted mono small">
             {project.repo_url} → {project.milestone_branch}
           </div>
+          <PhaseStepper phase={project.phase} />
         </div>
         <div className="actions">
-          <button className="btn" onClick={() => setPanel(panel === "add" ? "" : "add")}>
-            {panel === "add" ? "Cancel" : "Add task"}
-          </button>
+          {project.phase === "execute" && (
+            <button className="btn" onClick={() => setPanel(panel === "add" ? "" : "add")}>
+              {panel === "add" ? "Cancel" : "Add task"}
+            </button>
+          )}
           <button className="btn" onClick={() => setPanel(panel === "settings" ? "" : "settings")}>
             Settings
           </button>
@@ -249,6 +334,10 @@ export default function ProjectPage() {
       )}
       {panel === "settings" && <Settings project={project} onSaved={() => { setPanel(""); reload(); }} />}
 
+      {(project.phase === "specify" || project.phase === "decomposing") && <SpecWorkspace project={project} />}
+      {project.phase === "plan_review" && <PlanReview project={project} onChange={() => { reload(); reloadTasks(); }} />}
+      {project.phase === "execute" && (
+      <>
       <div className="board">
         {COLUMNS.map((col) => {
           const items = all.filter((t) => col.states.includes(t.state));
@@ -269,6 +358,8 @@ export default function ProjectPage() {
         </h2>
         <EventLog events={activity} />
       </section>
+      </>
+      )}
     </div>
   );
 }

@@ -15,11 +15,14 @@ writer.
 
 from __future__ import annotations
 
+import enum
+import json
 from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import cache
 from pathlib import Path
 
+from pydantic_core import PydanticUndefined
 from sqlalchemy import Table, event
 from sqlalchemy.engine import Engine
 from sqlmodel import Session, SQLModel, create_engine
@@ -52,8 +55,67 @@ def _engine_for(path: str, control: bool) -> Engine:
         cur.execute("PRAGMA foreign_keys=ON")
         cur.close()
 
-    SQLModel.metadata.create_all(engine, tables=CONTROL_TABLES if control else _main_tables())
+    tables = CONTROL_TABLES if control else _main_tables()
+    SQLModel.metadata.create_all(engine, tables=tables)
+    _add_missing_columns(engine, tables)
     return engine
+
+
+def _table_models() -> dict[str, type[SQLModel]]:
+    out: dict[str, type[SQLModel]] = {}
+    stack = list(SQLModel.__subclasses__())
+    while stack:
+        cls = stack.pop()
+        stack.extend(cls.__subclasses__())
+        table = getattr(cls, "__table__", None)
+        if table is not None:
+            out[table.name] = cls
+    return out
+
+
+def _sql_literal(value: object) -> str:
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, int | float):
+        return repr(value)
+    if isinstance(value, list | dict):
+        value = json.dumps(value)
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _add_missing_columns(engine: Engine, tables: list[Table]) -> None:
+    """Minimal forward migration: add columns introduced by newer versions.
+
+    create_all() creates missing tables but never alters existing ones, so a database
+    from an older foreman would lack new columns. New columns are only ever added
+    with defaults, which this handles; anything more needs a real migration.
+    """
+    models = _table_models()
+    with engine.begin() as conn:
+        for table in tables:
+            existing = {
+                row[1] for row in conn.exec_driver_sql(f'PRAGMA table_info("{table.name}")')
+            }
+            model = models.get(table.name)
+            for column in table.columns:
+                if column.name in existing:
+                    continue
+                default: object = None
+                field = model.model_fields.get(column.name) if model else None
+                if field is not None:
+                    if field.default_factory is not None:
+                        default = field.default_factory()  # type: ignore[call-arg]
+                    elif field.default is not PydanticUndefined:
+                        default = field.default
+                if isinstance(default, enum.Enum):  # SQLAlchemy stores enum *names*
+                    default = default.name
+                col_type = column.type.compile(dialect=engine.dialect)
+                conn.exec_driver_sql(
+                    f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {col_type} '
+                    f"DEFAULT {_sql_literal(default)}"
+                )
 
 
 def get_engine() -> Engine:

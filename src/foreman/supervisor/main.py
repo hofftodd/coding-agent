@@ -32,6 +32,8 @@ from foreman.core.models import (
     Control,
     ControlAction,
     ControlScope,
+    JobState,
+    PlannerJob,
     Project,
     RunState,
     Task,
@@ -92,6 +94,17 @@ def apply_control(control: Control, pool: ThreadPoolExecutor) -> str:
                 )
                 .values(paused=True, paused_at=now())
             )
+            s.commit()
+    # Planner jobs: mark them stopped; the orchestrator sees it between streamed tokens,
+    # closes the model connection and applies nothing.
+    if control.scope != ControlScope.TASK:
+        with session() as s:
+            q = update(PlannerJob).where(
+                col(PlannerJob.state).in_((JobState.QUEUED, JobState.RUNNING))
+            )
+            if control.scope == ControlScope.PROJECT:
+                q = q.where(col(PlannerJob.project_id) == control.target_id)
+            s.exec(q.values(state=JobState.STOPPED, error=reason, ended_at=now()))  # type: ignore[call-overload]
             s.commit()
     stoppable = (*ACTIVE_STATES, TaskState.QUEUED)
     task_q = select(Task).where(

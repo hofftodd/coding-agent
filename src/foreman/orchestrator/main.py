@@ -18,7 +18,17 @@ import signal
 from sqlmodel import col, select
 
 from foreman.config import get_settings
-from foreman.core.models import Node, Project, RunState, Task, TaskRun, TaskState
+from foreman.core.models import (
+    JobState,
+    Node,
+    PlannerJob,
+    Project,
+    ProjectPhase,
+    RunState,
+    Task,
+    TaskRun,
+    TaskState,
+)
 from foreman.core.state import (
     ACTIVE_STATES,
     emit,
@@ -30,6 +40,7 @@ from foreman.core.state import (
 )
 from foreman.db import session
 from foreman.executors import get_executor
+from foreman.orchestrator.jobs import JobRunner, finish_job
 from foreman.orchestrator.runner import TaskRunner, resolve_executor
 from foreman.sandbox import Runtime, get_runtime, kill_handle
 
@@ -60,6 +71,13 @@ def recover() -> None:
     for t in orphans:
         if t.id is not None and t.id not in open_runs:
             transition(t.id, ACTIVE_STATES, TaskState.FAILED, "orchestrator restarted")
+    # Planner jobs cut off mid-call.
+    with session() as s:
+        jobs = s.exec(select(PlannerJob).where(PlannerJob.state == JobState.RUNNING)).all()
+    for job in jobs:
+        assert job.id is not None
+        if finish_job(job.id, (JobState.RUNNING,), JobState.FAILED, "orchestrator restarted"):
+            JobRunner(job.id)._after_failure("orchestrator restarted; send your message again")
 
 
 def pick_ready() -> list[tuple[Task, int | None, str]]:
@@ -82,6 +100,8 @@ def pick_ready() -> list[tuple[Task, int | None, str]]:
     for t in tasks:
         p = projects.get(t.project_id)
         if t.state != TaskState.QUEUED or t.hold or p is None or p.paused or p.clone_error:
+            continue
+        if p.phase != ProjectPhase.EXECUTE:
             continue
         if t.project_id in busy_projects or t.project_id in stopping_projects:
             continue
@@ -109,6 +129,7 @@ class Orchestrator:
         self.runtime = runtime or get_runtime()
         self.settings = get_settings()
         self.running: dict[int, asyncio.Task[None]] = {}
+        self.jobs: dict[int, asyncio.Task[None]] = {}  # planner jobs by project id
         self._stop = asyncio.Event()
 
     def start_task(self, task: Task, node_id: int | None, model: str) -> bool:
@@ -136,11 +157,38 @@ class Orchestrator:
         for tid, fut in list(self.running.items()):
             if fut.done():
                 del self.running[tid]
+        for pid, fut in list(self.jobs.items()):
+            if fut.done():
+                del self.jobs[pid]
         if estop_active():
             return
+        self.start_jobs()
         for task, node_id, model in pick_ready():
             if task.id not in self.running:
                 self.start_task(task, node_id, model)
+
+    def start_jobs(self) -> None:
+        """Start queued planner jobs: one at a time per project."""
+        stopping, _ = pending_stops()
+        with session() as s:
+            queued = s.exec(
+                select(PlannerJob)
+                .where(PlannerJob.state == JobState.QUEUED)
+                .order_by(col(PlannerJob.id))
+            ).all()
+            busy = {
+                j.project_id
+                for j in s.exec(select(PlannerJob).where(PlannerJob.state == JobState.RUNNING))
+            }
+            paused = {p.id for p in s.exec(select(Project).where(col(Project.paused)))}
+        for job in queued:
+            assert job.id is not None
+            if job.project_id in busy or job.project_id in self.jobs:
+                continue
+            if job.project_id in stopping or job.project_id in paused:
+                continue
+            busy.add(job.project_id)
+            self.jobs[job.project_id] = asyncio.create_task(JobRunner(job.id).run())
 
     async def run_forever(self) -> None:
         recover()
@@ -152,7 +200,7 @@ class Orchestrator:
                 log.exception("tick failed")
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(self._stop.wait(), self.settings.poll_interval_s)
-        for fut in self.running.values():
+        for fut in [*self.running.values(), *self.jobs.values()]:
             fut.cancel()
 
     def request_stop(self) -> None:

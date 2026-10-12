@@ -10,7 +10,13 @@ from foreman.db import session
 
 
 def make_project(client: Any, origin: Any, **kw: Any) -> dict[str, Any]:
-    body = {"name": "demo", "repo_url": str(origin), "executor_kind": "shell", **kw}
+    body = {
+        "name": "demo",
+        "repo_url": str(origin),
+        "executor_kind": "shell",
+        "skip_spec": True,
+        **kw,
+    }
     r = client.post("/api/projects", json=body)
     assert r.status_code == 201, r.text
     return r.json()
@@ -65,7 +71,8 @@ async def drive(
         await orch.tick()
         if until():
             if settle:
-                await asyncio.gather(*orch.running.values(), return_exceptions=True)
+                pending = [*orch.running.values(), *getattr(orch, "jobs", {}).values()]
+                await asyncio.gather(*pending, return_exceptions=True)
             return
         await asyncio.sleep(0.05)
     raise AssertionError("timed out waiting for condition")

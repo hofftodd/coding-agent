@@ -67,3 +67,6 @@ export function streamUrl(params: Record<string, string | number | undefined>): 
   if (token) q.set("token", token); // EventSource cannot send headers
   return `/api/stream?${q}`;
 }
+
+export const put = <T>(path: string, body: unknown) =>
+  api<T>(path, { method: "PUT", body: JSON.stringify(body) });
