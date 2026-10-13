@@ -21,6 +21,7 @@ class ProjectCreate(BaseModel):
     skip_spec: bool = False
     test_cmd: str = ""
     executor_kind: str = "opencode"
+    network: Literal["gateway", "open"] = "gateway"
     role_bindings: dict[str, RoleBinding] = Field(default_factory=dict)
     push_after_merge: bool = False
     gates: dict[str, Any] = Field(default_factory=dict)
@@ -34,6 +35,7 @@ class ProjectUpdate(BaseModel):
     context_budget_pct: int | None = Field(default=None, ge=5, le=90)
     test_cmd: str | None = None
     executor_kind: str | None = None
+    network: Literal["gateway", "open"] | None = None
     role_bindings: dict[str, RoleBinding] | None = None
     gates: dict[str, Any] | None = None
     watchdog: dict[str, Any] | None = None

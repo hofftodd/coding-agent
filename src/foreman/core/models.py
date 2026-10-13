@@ -99,7 +99,9 @@ class Project(SQLModel, table=True):
     # Project-wide test command run after every task (regression guard). Optional.
     test_cmd: str = ""
     executor_kind: str = "opencode"
-    # role -> {"node_id": int, "model": str}. Roles: "executor", "planner".
+    # Executor containers' network: "gateway" (only the model gateway) or "open".
+    network: str = "gateway"
+    # role -> {"node_id": int, "model": str}. Roles: "executor", "planner", "escalation".
     role_bindings: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     # Optional checkpoints, e.g. {"plan_approval": true}. See core/gates.py.
     gates: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))

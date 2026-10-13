@@ -175,6 +175,7 @@ async def create_project(body: ProjectCreate) -> Project:
         push_after_merge=body.push_after_merge,
         gates=body.gates,
         watchdog=body.watchdog,
+        network=body.network,
     )
     with session() as s:
         s.add(p)

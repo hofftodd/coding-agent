@@ -15,7 +15,7 @@ import asyncio
 import time
 from pathlib import Path
 
-from foreman import gitops
+from foreman import gitops, toolchain
 from foreman.config import get_settings
 from foreman.core import gates, watchdog
 from foreman.core.contextpack import build_pack
@@ -70,13 +70,15 @@ class TaskRunner:
         task_id: int,
         run_id: int,
         runtime: Runtime | None = None,
-        gateway_url: str = "",
+        gateway_urls: dict[str, str] | None = None,
     ):
         self.task_id = task_id
         self.run_id = run_id
         self.runtime = runtime or get_runtime()
-        # Base URL of the model gateway as seen from where the executor runs.
-        self.gateway_url = gateway_url
+        # Base URL of the model gateway as seen from executors, per network mode.
+        self.gateway_urls = gateway_urls or {}
+        # Container image for this run's steps (set from the project's toolchain image).
+        self.image = ""
         self._tail: list[str] = []
         self.settings = get_settings()
         self.run_dir = self.settings.runs_dir / str(run_id)
@@ -120,7 +122,7 @@ class TaskRunner:
         self, name: str, command: list[str], env: dict[str, str], kind: str, timeout_s: float
     ) -> int:
         """Run one container step, streaming output into events and a log file."""
-        task, _ = self._load()
+        task, project = self._load()
         spec = StepSpec(
             name=f"foreman-run{self.run_id}-{name}-{int(time.time() * 1000) % 10**8}",
             workspace=gitops.task_dir(task.project_id, self.task_id),
@@ -132,6 +134,8 @@ class TaskRunner:
                 "foreman.task": str(self.task_id),
                 "foreman.project": str(task.project_id),
             },
+            network=project.network,
+            image=self.image,
         )
         proc = await self.runtime.start(spec)
         self._set_handle(proc.handle)
@@ -264,6 +268,13 @@ class TaskRunner:
             gitops.prepare_task_clone, task.project_id, self.task_id, project.milestone_branch
         )
         self._check()
+        try:
+            self.image = await toolchain.ensure_image(
+                task.project_id, clone, lambda line: self._emit("build", line)
+            )
+        except toolchain.ToolchainError as e:
+            raise ConfigError(str(e)) from e
+        self._check()
 
         # 1. Executor
         kind, node_id, model = resolve_executor(project, task)
@@ -279,12 +290,17 @@ class TaskRunner:
             raise ConfigError(f"node {node.name} ({node.provider}) cannot run executors")
         endpoint = ""
         if executor.needs_node:
-            if not self.gateway_url:
-                raise ConfigError("the model gateway is not running")
+            base = self.gateway_urls.get(project.network, "")
+            if not base:
+                raise ConfigError(
+                    "the model gateway is not reachable from executors"
+                    + (" (egress lockdown unavailable; see the orchestrator log)"
+                       if project.network == "gateway" else "")
+                )
             with session() as s:
                 run = s.get(TaskRun, self.run_id)
                 assert run is not None
-                endpoint = f"{self.gateway_url}/g/{run.gateway_token}/v1"
+                endpoint = f"{base}/g/{run.gateway_token}/v1"
         pack = await asyncio.to_thread(
             build_pack,
             project,

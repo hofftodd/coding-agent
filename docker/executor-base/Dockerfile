@@ -17,7 +17,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl git bash tar gzip \
+      ca-certificates curl git bash tar gzip socat \
  && rm -rf /var/lib/apt/lists/*
 
 # OpenCode: single static binary from the GitHub release.

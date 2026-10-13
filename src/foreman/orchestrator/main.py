@@ -14,6 +14,7 @@ import asyncio
 import contextlib
 import logging
 import signal
+import time
 from typing import Any
 
 from sqlmodel import col, select
@@ -44,10 +45,11 @@ from foreman.core.state import (
 from foreman.db import session
 from foreman.executors import get_executor
 from foreman.gateway import Gateway, new_token, serve
+from foreman.llm import list_models
 from foreman.orchestrator import gate_actions, milestone
 from foreman.orchestrator.jobs import JobRunner, finish_job
 from foreman.orchestrator.runner import TaskRunner, resolve_executor
-from foreman.sandbox import Runtime, get_runtime, kill_handle
+from foreman.sandbox import Runtime, ensure_egress_lockdown, get_runtime, kill_handle
 
 log = logging.getLogger("foreman.orchestrator")
 
@@ -85,6 +87,53 @@ def recover() -> None:
             JobRunner(job.id)._after_failure("orchestrator restarted; send your message again")
 
 
+def node_load() -> dict[int, int]:
+    """Work currently on each node: running task attempts plus running planner jobs."""
+    load: dict[int, int] = {}
+    with session() as s:
+        runs = s.exec(select(TaskRun).where(TaskRun.state == RunState.RUNNING)).all()
+        jobs = s.exec(select(PlannerJob).where(PlannerJob.state == JobState.RUNNING)).all()
+    for nid in [r.node_id for r in runs] + [j.node_id for j in jobs]:
+        if nid is not None:
+            load[nid] = load.get(nid, 0) + 1
+    return load
+
+
+def node_available(node: Node | None, load: dict[int, int]) -> bool:
+    """A node can take more work: it exists, isn't known to be down, and has a free slot."""
+    if node is None or node.id is None or node.healthy is False:
+        return False
+    return load.get(node.id, 0) < node.capacity
+
+
+async def check_nodes() -> None:
+    """Refresh each node's health and model list; announce changes."""
+    with session() as s:
+        nodes = s.exec(select(Node)).all()
+
+    async def one(node: Node) -> None:
+        try:
+            models = await asyncio.wait_for(list_models(node), 15)
+            healthy, error = True, ""
+        except Exception as e:  # noqa: BLE001 - any failure means unreachable
+            models, healthy, error = list(node.models), False, str(e) or type(e).__name__
+        with session() as s:
+            row = s.get(Node, node.id)
+            if row is None:
+                return
+            changed = row.healthy is not None and row.healthy != healthy
+            row.healthy, row.last_checked = healthy, time.time()
+            row.models = models or row.models
+            s.add(row)
+            s.commit()
+        if changed:
+            emit(None, None, "system",
+                 f"node {node.name} is {'back' if healthy else 'unreachable'}"
+                 + (f": {error}" if error else ""), node_id=node.id)
+
+    await asyncio.gather(*(one(n) for n in nodes))
+
+
 def pick_ready() -> list[tuple[Task, int | None, str]]:
     """Ready tasks in id order with their resolved (node_id, model)."""
     with session() as s:
@@ -105,12 +154,7 @@ def pick_ready() -> list[tuple[Task, int | None, str]]:
         }
     by_id = {t.id: t for t in tasks}
     busy_projects = {t.project_id for t in tasks if t.state in ACTIVE_STATES}
-    node_load: dict[int, int] = {}
-    for t in tasks:
-        if t.state in ACTIVE_STATES:
-            _, nid, _ = resolve_executor(projects[t.project_id], t)
-            if nid is not None:
-                node_load[nid] = node_load.get(nid, 0) + 1
+    load = node_load()
 
     ready = []
     for t in tasks:
@@ -133,10 +177,9 @@ def pick_ready() -> list[tuple[Task, int | None, str]]:
         except ValueError:
             needs_node = False
         if needs_node and nid is not None:
-            node = nodes.get(nid)
-            if node is None or node_load.get(nid, 0) >= node.capacity:
+            if not node_available(nodes.get(nid), load):
                 continue
-            node_load[nid] = node_load.get(nid, 0) + 1
+            load[nid] = load.get(nid, 0) + 1
         busy_projects.add(t.project_id)
         ready.append((t, nid, model))
     return ready
@@ -152,6 +195,9 @@ class Orchestrator:
         self.gateway: Gateway | None = None
         self.gateway_server: Any = None
         self.gateway_port = 0
+        self.locked_url = ""
+        self._health: asyncio.Task[None] | None = None
+        self._last_health = 0.0
         self._stop = asyncio.Event()
 
     async def ensure_gateway(self) -> None:
@@ -161,14 +207,28 @@ class Orchestrator:
                 self.gateway, self.settings.gateway_host, self.settings.gateway_port
             )
             log.info("model gateway on port %s", self.gateway_port)
+        if self.runtime.name == "docker" and not self.locked_url:
+            try:
+                self.locked_url = await asyncio.to_thread(
+                    ensure_egress_lockdown, self.gateway_port
+                )
+                log.info("executor network locked down; gateway at %s", self.locked_url)
+            except (RuntimeError, OSError) as e:
+                # Tasks in "gateway" network mode fail with a config error until fixed.
+                log.error("egress lockdown unavailable: %s", e)
 
     @property
-    def gateway_url(self) -> str:
-        """The gateway as reachable from where executors run."""
+    def gateway_urls(self) -> dict[str, str]:
+        """The gateway as reachable from executors, per network mode."""
         if not self.gateway_port:
-            return ""
-        host = "host.docker.internal" if self.runtime.name == "docker" else "127.0.0.1"
-        return f"http://{host}:{self.gateway_port}"
+            return {}
+        if self.runtime.name != "docker":
+            local = f"http://127.0.0.1:{self.gateway_port}"
+            return {"gateway": local, "open": local}
+        urls = {"open": f"http://host.docker.internal:{self.gateway_port}"}
+        if self.locked_url:
+            urls["gateway"] = self.locked_url
+        return urls
 
     def start_task(self, task: Task, node_id: int | None, model: str) -> bool:
         assert task.id is not None
@@ -192,7 +252,7 @@ class Orchestrator:
             run_id = run.id
         assert run_id is not None
         emit(task.project_id, task_id, "system", f"attempt {t.attempts} started", run_id=run_id)
-        runner = TaskRunner(task_id, run_id, self.runtime, self.gateway_url)
+        runner = TaskRunner(task_id, run_id, self.runtime, self.gateway_urls)
         self.running[task_id] = asyncio.create_task(runner.run())
         return True
 
@@ -207,6 +267,7 @@ class Orchestrator:
             await gate_actions.handle(gate)
         if estop_active():
             return
+        self.start_health_checks()
         self.start_jobs()
         self.start_acceptance()
         for task, node_id, model in pick_ready():
@@ -227,14 +288,33 @@ class Orchestrator:
                 for j in s.exec(select(PlannerJob).where(PlannerJob.state == JobState.RUNNING))
             }
             paused = {p.id for p in s.exec(select(Project).where(col(Project.paused)))}
+            projects = {p.id: p for p in s.exec(select(Project))}
+            nodes = {n.id: n for n in s.exec(select(Node))}
+        load = node_load()
         for job in queued:
             assert job.id is not None
             if job.project_id in busy or job.project_id in self.jobs:
                 continue
             if job.project_id in stopping or job.project_id in paused:
                 continue
+            # Planner calls share node capacity with task attempts.
+            binding = ((projects[job.project_id].role_bindings or {}).get("planner") or {})
+            nid = binding.get("node_id")
+            if nid is not None:
+                if not node_available(nodes.get(nid), load):
+                    continue
+                load[nid] = load.get(nid, 0) + 1
             busy.add(job.project_id)
             self.jobs[job.project_id] = asyncio.create_task(JobRunner(job.id).run())
+
+    def start_health_checks(self) -> None:
+        """Check every node in the background, every NODE_CHECK_S seconds."""
+        if self._health is not None and not self._health.done():
+            return
+        if time.monotonic() - self._last_health < self.settings.node_check_s:
+            return
+        self._last_health = time.monotonic()
+        self._health = asyncio.create_task(check_nodes())
 
     def start_acceptance(self) -> None:
         stopping, _ = pending_stops()
