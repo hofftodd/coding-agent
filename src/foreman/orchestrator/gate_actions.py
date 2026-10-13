@@ -6,8 +6,8 @@ import asyncio
 import logging
 
 from foreman import gitops
-from foreman.core import gates
-from foreman.core.models import Gate, GateKind, GateState, Project, TaskState
+from foreman.core import gates, spend
+from foreman.core.models import Gate, GateKind, GateState, Project, TaskState, now
 from foreman.core.state import emit, transition
 from foreman.db import session
 
@@ -58,6 +58,17 @@ async def handle(gate: Gate) -> None:
                     replan.reject_revision(rev_id)
         elif gate.kind == GateKind.SPEC_CHANGE and approved:
             await asyncio.to_thread(replan.record_spec_change, gate.project_id, gate.payload)
+        elif gate.kind == GateKind.BUDGET:
+            if approved:
+                spend.raise_cap(gate.project_id, float(gate.payload.get("cap") or 0))
+            else:
+                with session() as s:
+                    p = s.get(Project, gate.project_id)
+                    if p is not None:
+                        p.paused, p.paused_at = True, now()
+                        s.add(p)
+                        s.commit()
+                emit(gate.project_id, None, "control", "project paused at its spend cap")
         elif gate.kind == GateKind.MILESTONE and approved:
             await asyncio.to_thread(milestone.publish, gate.project_id)
     except Exception:  # noqa: BLE001 - one bad gate must not wedge the others

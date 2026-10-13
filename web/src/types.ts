@@ -44,8 +44,13 @@ export interface Project {
   role_bindings: Record<string, RoleBinding>;
   paused: boolean;
   push_after_merge: boolean;
+  network: "gateway" | "open";
+  spend_usd: number;
+  spend_cap_usd: number;
   created_at: number;
   task_counts?: Partial<Record<TaskState, number>>;
+  pending_gates?: number;
+  active_task?: string;
 }
 
 export interface TaskRun {
@@ -111,6 +116,10 @@ export interface Node {
   models: string[];
   healthy: boolean | null;
   last_checked: number | null;
+  price_in: number;
+  price_out: number;
+  active: number;
+  waiting: number;
   error?: string;
 }
 
@@ -193,7 +202,7 @@ export interface WatchdogLimits {
   max_acceptance_failures: number;
 }
 
-export type GateKind = "plan_revision" | "spec_change" | "task_merge" | "escalation" | "milestone";
+export type GateKind = "plan_revision" | "spec_change" | "task_merge" | "escalation" | "milestone" | "budget";
 
 export interface Gate {
   id: number;

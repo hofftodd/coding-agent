@@ -23,7 +23,7 @@ from foreman.core.models import GateKind, Node, Project, RunState, Task, TaskRun
 from foreman.core.state import ACTIVE_STATES, emit, finish_run, stop_requested, transition
 from foreman.core.watchdog import failure_signature
 from foreman.db import session
-from foreman.executors import get_executor
+from foreman.executors import EXIT_CONFIG, get_executor
 from foreman.sandbox import Proc, Runtime, StepSpec, get_runtime, kill_handle
 
 LOG_FLUSH_S = 0.25
@@ -159,7 +159,8 @@ class TaskRunner:
             watcher.cancel()
         reason = self._watchdog_reason()
         if reason:
-            raise WatchdogTrip(f"watchdog: {reason}", reason)
+            kind = "budget" if reason.startswith("spend cap") else ""
+            raise WatchdogTrip(f"watchdog: {reason}", reason, kind)
         return code
 
     def _watchdog_reason(self) -> str:
@@ -322,6 +323,8 @@ class TaskRunner:
         code = await self._step("execute", inv.command, inv.env, "log", task.timeout_s)
         task = self._check()
         await asyncio.to_thread(gitops.commit_all, clone, f"Task {self.task_id}: {task.title}")
+        if code == EXIT_CONFIG and executor.needs_node:
+            raise ConfigError(self._tail[-1] if self._tail else f"{kind} is not usable here")
         if code != 0:
             raise StepFailed(f"executor exited with status {code}", "\n".join(self._tail))
 

@@ -129,11 +129,12 @@ and default role bindings.
 - Configurable gates + "Needs you" inbox + ntfy notifications.
 - Milestone PRs on GitHub.
 
-### M4 — Multi-node & polish
+### M4 — Multi-node & polish ✅
 - Multi-node scheduling with capacities, node health view.
 - Cloud spend tracking and caps.
 - Portfolio dashboard, validation trend charts.
 - Aider executor; crash-recovery hardening.
+- Carried over from M3: container egress lockdown, per-project toolchain images.
 
 ## 7. Risks
 
@@ -322,3 +323,81 @@ Design changes made while building M1 (spec updated where relevant):
   budgets but not node-level concurrency.
 - Token counts fall back to estimates when a server doesn't report usage.
 - Regression detection is exit-code based.
+
+## 11. M4 implementation notes
+
+- **Egress lockdown** (FR-4.6, `sandbox.ensure_egress_lockdown`): executor
+  containers join `foreman-net-<instance>`, a Docker `--internal` network.
+  Its only other member is `foreman-relay-<instance>` (socat in the base
+  image), which also sits on the default bridge and forwards
+  `foreman-gateway:8701` to the gateway port on the host. The allowlist is
+  therefore exactly one endpoint, the model gateway. `Project.network =
+  "open"` keeps the old bridge networking for projects that need it (the
+  gateway is then reached at `host.docker.internal`). If the lockdown can't
+  be set up, gateway-mode tasks fail with a configuration error rather than
+  running unconfined.
+- **Toolchain images** (`toolchain.py`): `.foreman/Dockerfile` must build
+  `FROM foreman/executor-base` (checked, so agents stay unprivileged). The
+  image is tagged by a hash of the Dockerfile, the base image name and every
+  file it COPYs/ADDs, built before the first step that needs it (builds have
+  network; tasks don't), and used for task steps and acceptance checks. A bad
+  Dockerfile or failed build blocks the task as a configuration problem.
+- **Multi-node scheduling** (`orchestrator/main.py`): node load = running
+  task attempts + running planner jobs; both count against `Node.capacity`.
+  Nodes are health-checked every `FOREMAN_NODE_CHECK_S` (model list fetch,
+  15 s timeout); a node whose last check failed gets no new work, and
+  "unreachable" / "back" transitions are logged as events. A node never
+  checked gets the benefit of the doubt. `/api/nodes` reports `active` and
+  `waiting` per node; `PATCH /api/nodes/{id}` edits capacity, prices etc.
+- **Spend** (FR-9.3, `core/spend.py`): `Node.price_in/out` in USD per
+  million tokens; `Project.spend_usd` accumulates the cost of every call on a
+  priced node, from planner jobs (reported usage) and the gateway (reported
+  usage, else estimates). At `Project.spend_cap_usd` an always-on BUDGET
+  gate opens once; paid calls are refused (gateway: 429 + a "spend cap"
+  watchdog trip; planner jobs wait; the scheduler starts no task or job on a
+  priced node). A task cut off by the cap is re-queued without counting as a
+  failure. Approving the gate extends the cap by its original amount;
+  rejecting pauses the project; editing the cap in settings cancels or opens
+  the gate as appropriate.
+- **Portfolio** (`ProjectsPage`, `ProgressChart`): summary tiles (projects
+  working, open checkpoints, node slots busy, cloud spend), a progress bar,
+  active task and open checkpoints per project, and per project a step chart
+  of tasks done vs. tasks planned, computed from task creation times and
+  state-change events (`GET /api/projects/{id}/progress`). Discarded and
+  split tasks leave the plan. The chart has a crosshair tooltip, direct
+  labels, a legend and a table view.
+- **Aider** (`executors/aider.py`): optional in the base image
+  (`foreman build-image --with-aider`). One-shot `--message-file` run against
+  the gateway, with the task's literal allowed files in the chat and its
+  context files read-only; Foreman commits. An executor command can exit 78
+  (`EXIT_CONFIG`) to mean "can't work as configured" (e.g. Aider not
+  installed), which blocks the task instead of retrying it.
+- **Crash recovery** (`recover()` on orchestrator start, NFR-2): besides
+  failing open runs and planner jobs, it kills and clears interrupted
+  acceptance checks (they re-run, no result was recorded) and restores each
+  main clone: stale `index.lock` removed, unfinished merge aborted, milestone
+  branch checked out, uncommitted changes from a cut-off write dropped. Each
+  repair is logged as an event on the project.
+
+### Validation coverage after M4
+
+| Check | Status |
+|---|---|
+| V4.3 node capacity never exceeded | ✅ `test_node_capacity_respected`, `test_tasks_spread_over_nodes_up_to_capacity`, `test_planner_jobs_share_node_capacity` |
+| V4.4 executor containers can't reach other hosts | ✅ `test_network_modes[gateway]`: gateway reachable; internet, `host.docker.internal` and the bridge gateway are not (`tests/test_docker.py`) |
+| Node health | ✅ `test_health_checks_mark_nodes_and_announce_changes`, `test_unhealthy_node_gets_no_tasks` |
+| V9.1 restart leaves nothing stuck | ✅ M1 tests plus `tests/test_recovery.py` (interrupted merge, dirty clone, wrong branch, acceptance) |
+| V10.1 spend cap → budget gate, cloud calls stop | ✅ `test_planner_spend_reaches_cap_and_waits_for_approval`, `test_priced_node_charges_and_stops_at_cap`, `test_tasks_on_priced_nodes_wait_at_the_cap`, `test_rejecting_the_budget_pauses_the_project`, `test_raising_the_cap_in_settings_clears_the_checkpoint` |
+| Toolchain images | ✅ `tests/test_toolchain.py`, `test_toolchain_image_built_once_and_used`, `test_toolchain_must_derive_from_base` |
+| Aider | ✅ command construction and "not installed → blocked, not retried" (`tests/test_recovery.py`). Not run against a real model in CI. |
+| Portfolio / progress | ✅ `test_progress_series_and_portfolio_fields`; screenshots via `scripts/screenshots.sh` |
+
+### Known gaps
+
+- Token counts fall back to estimates when a server doesn't report usage, so
+  spend on such servers is approximate.
+- Regression detection is exit-code based.
+- Aider has only been exercised with the scripted test setup, not real models.
+- Projects still run one task at a time each; parallelism comes from running
+  several projects across nodes.
+- GitHub Issues integration remains a future enhancement (spec §9).

@@ -62,6 +62,7 @@ class GateKind(StrEnum):
     TASK_MERGE = "task_merge"  # a validated task waits to be merged
     ESCALATION = "escalation"  # a task is blocked; retry or discard
     MILESTONE = "milestone"  # acceptance passed; approve to push / open the PR
+    BUDGET = "budget"  # the project reached its spend cap; approve to raise it
 
 
 class GateState(StrEnum):
@@ -130,6 +131,9 @@ class Project(SQLModel, table=True):
     paused: bool = False
     # When `paused` last changed; lets a late Stop avoid undoing a newer Resume.
     paused_at: float = 0.0
+    # Spend on priced (cloud) nodes, in USD, and the cap that gates it (0 = no cap).
+    spend_usd: float = 0.0
+    spend_cap_usd: float = 0.0
     push_after_merge: bool = False
     clone_error: str = ""
     created_at: float = Field(default_factory=now)
@@ -150,6 +154,9 @@ class Node(SQLModel, table=True):
     models: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     healthy: bool | None = None
     last_checked: float | None = None
+    # USD per million tokens; 0 for local nodes. Priced nodes count against spend caps.
+    price_in: float = 0.0
+    price_out: float = 0.0
 
 
 class Task(SQLModel, table=True):

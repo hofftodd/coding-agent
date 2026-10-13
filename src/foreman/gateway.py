@@ -7,7 +7,8 @@ run's node and, on the way:
 - refuses calls once the run is stopped, finished or tripped;
 - counts model requests and tokens against the watchdog budgets (FR-5.1);
 - spots the agent returning the same response over and over (FR-5.2);
-- adds the node's API key itself, so keys never enter the sandbox (NFR-5).
+- adds the node's API key itself, so keys never enter the sandbox (NFR-5);
+- charges priced nodes to the project and refuses calls past its spend cap.
 
 When a limit is hit it records the reason on the run (``TaskRun.watchdog``)
 and answers with an error; the runner sees the trip and kills the container.
@@ -31,7 +32,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from foreman.core import watchdog
+from foreman.core import spend, watchdog
 from foreman.core.contextpack import estimate_tokens
 from foreman.core.models import Node, Project, RunState, Task, TaskRun, TaskState
 from foreman.core.state import ACTIVE_STATES, emit, stop_requested
@@ -159,6 +160,7 @@ class Gateway:
             s.add(run)
             s.commit()
             total = run.tokens_in + run.tokens_out
+        spend.charge(info.run.project_id, info.node, tokens_in, tokens_out)
         cap = watchdog.limit(info.project, "max_tokens")
         if total > cap:
             trip(run_id, f"token budget exceeded ({total:,} > {cap:,})")
@@ -206,7 +208,7 @@ class Gateway:
                 r.content, status_code=r.status_code, media_type=r.headers.get("content-type")
             )
 
-        reason = self._count_request(info)
+        reason = spend.blocked(info.run.project_id, info.node) or self._count_request(info)
         if reason:
             trip(info.run.id, reason)
             return _error(429, reason)

@@ -4,6 +4,7 @@ import { control, del, patch, post } from "../api";
 import { ActionButton, ErrorNote, EventLog, Field, StateBadge, StopButton, lines } from "../components";
 import { useEventStream, usePoll } from "../hooks";
 import type { Node, PlanRevision, Project, ProjectPhase, SystemInfo, Task, TaskState } from "../types";
+import ProgressChart, { type ProgressPoint } from "../ProgressChart";
 import PlanReview from "./PlanReview";
 import SpecWorkspace from "./SpecWorkspace";
 
@@ -190,6 +191,8 @@ function Settings({ project, onSaved }: { project: Project; onSaved: () => void 
     max_task_files: project.max_task_files,
     context_budget_pct: project.context_budget_pct,
     plan_approval: project.gates?.plan_approval !== false,
+    network: project.network,
+    spend_cap_usd: project.spend_cap_usd,
   });
   const [error, setError] = useState("");
   const set = (k: string, v: unknown) => setF((x) => ({ ...x, [k]: v }));
@@ -209,6 +212,8 @@ function Settings({ project, onSaved }: { project: Project; onSaved: () => void 
             push_after_merge: f.push_after_merge,
             max_task_files: f.max_task_files,
             context_budget_pct: f.context_budget_pct,
+            network: f.network,
+            spend_cap_usd: f.spend_cap_usd,
             gates: { ...project.gates, plan_approval: f.plan_approval, ...g },
             watchdog: { ...project.watchdog, ...w },
             role_bindings: {
@@ -233,6 +238,7 @@ function Settings({ project, onSaved }: { project: Project; onSaved: () => void 
         <Field label="Executor">
           <select value={f.executor_kind} onChange={(e) => set("executor_kind", e.target.value)}>
             <option>opencode</option>
+            <option>aider</option>
             <option>shell</option>
           </select>
         </Field>
@@ -247,6 +253,18 @@ function Settings({ project, onSaved }: { project: Project; onSaved: () => void 
         </Field>
         <Field label="Project test command" hint="Runs after every task to catch regressions">
           <input className="mono" value={f.test_cmd} onChange={(e) => set("test_cmd", e.target.value)} />
+        </Field>
+        <Field label="Executor network" hint="Gateway: containers can reach only their model">
+          <select value={f.network} onChange={(e) => set("network", e.target.value)}>
+            <option value="gateway">Model gateway only</option>
+            <option value="open">Open (internet access)</option>
+          </select>
+        </Field>
+      </div>
+      <h3>Spend</h3>
+      <div className="grid2">
+        <Field label="Spend cap (USD)" hint={`Paid (cloud) model calls stop here and ask you. 0 = no cap. Spent so far: $${project.spend_usd.toFixed(2)}`}>
+          <input type="number" min={0} step={0.5} value={f.spend_cap_usd} onChange={(e) => set("spend_cap_usd", Number(e.target.value))} />
         </Field>
       </div>
       <h3>Watchdog (per task attempt)</h3>
@@ -300,6 +318,25 @@ function Settings({ project, onSaved }: { project: Project; onSaved: () => void 
       <ErrorNote error={error} />
       <button className="btn primary">Save</button>
     </form>
+  );
+}
+
+function Progress({ project }: { project: Project }) {
+  const { data } = usePoll<ProgressPoint[]>(`/api/projects/${project.id}/progress`, 10000);
+  const capped = project.spend_cap_usd > 0;
+  return (
+    <section className="card">
+      <div className="row">
+        <h2>Progress</h2>
+        {(project.spend_usd > 0 || capped) && (
+          <span className="small">
+            Spend <b>${project.spend_usd.toFixed(2)}</b>
+            {capped && <span className="muted"> of ${project.spend_cap_usd.toFixed(2)} cap</span>}
+          </span>
+        )}
+      </div>
+      <ProgressChart points={data ?? []} now={Date.now() / 1000} />
+    </section>
   );
 }
 
@@ -466,6 +503,7 @@ export default function ProjectPage() {
       {(project.phase === "execute" || project.phase === "done") && (
       <>
       <Milestone project={project} />
+      <Progress project={project} />
       <div className="board">
         {COLUMNS.map((col) => {
           const items = all.filter((t) => col.states.includes(t.state));

@@ -26,6 +26,7 @@ class ProjectCreate(BaseModel):
     push_after_merge: bool = False
     gates: dict[str, Any] = Field(default_factory=dict)
     watchdog: dict[str, Any] = Field(default_factory=dict)
+    spend_cap_usd: float = Field(default=0.0, ge=0)
 
 
 class ProjectUpdate(BaseModel):
@@ -40,6 +41,7 @@ class ProjectUpdate(BaseModel):
     gates: dict[str, Any] | None = None
     watchdog: dict[str, Any] | None = None
     push_after_merge: bool | None = None
+    spend_cap_usd: float | None = Field(default=None, ge=0)
 
 
 class TaskCreate(BaseModel):
@@ -80,6 +82,18 @@ class NodeCreate(BaseModel):
     api_key: str = ""
     capacity: int = Field(default=1, ge=1, le=64)
     models: list[str] = Field(default_factory=list)
+    price_in: float = Field(default=0.0, ge=0)
+    price_out: float = Field(default=0.0, ge=0)
+
+
+class NodeUpdate(BaseModel):
+    name: str | None = None
+    base_url: str | None = None
+    context_window: int | None = Field(default=None, ge=1024, le=10_000_000)
+    api_key: str | None = None
+    capacity: int | None = Field(default=None, ge=1, le=64)
+    price_in: float | None = Field(default=None, ge=0)
+    price_out: float | None = Field(default=None, ge=0)
 
 
 class ControlRequest(BaseModel):

@@ -188,6 +188,34 @@ def merge_task(project_id: int, task_id: int, title: str) -> None:
         raise GitError(f"merge conflict: {proc.stdout.strip()} {proc.stderr.strip()}")
 
 
+def recover_repo(project_id: int, milestone_branch: str) -> list[str]:
+    """After a crash: put the main clone back into a clean state on the milestone branch.
+
+    Only the orchestrator writes here, so anything half-done is its own interrupted work:
+    a merge (aborted - the task merges again), a stale lock, uncommitted files from a
+    planner write (dropped - the job is re-run).
+    """
+    repo = repo_dir(project_id)
+    if not (repo / ".git").is_dir():
+        return []
+    done: list[str] = []
+    lock = repo / ".git" / "index.lock"
+    if lock.exists():
+        lock.unlink(missing_ok=True)
+        done.append("removed a stale git lock")
+    if (repo / ".git" / "MERGE_HEAD").exists():
+        git("merge", "--abort", cwd=repo, check=False)
+        done.append("aborted an interrupted merge")
+    current = git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo, check=False).strip()
+    if current != milestone_branch:
+        git("checkout", "--quiet", "--force", milestone_branch, cwd=repo, check=False)
+        done.append(f"switched back to {milestone_branch}")
+    if git("status", "--porcelain", "--untracked-files=no", cwd=repo, check=False).strip():
+        git("reset", "--quiet", "--hard", "HEAD", cwd=repo, check=False)
+        done.append("discarded uncommitted changes")
+    return done
+
+
 def push(project_id: int, repo_url: str, branch: str) -> None:
     git("push", "--quiet", "origin", branch, cwd=repo_dir(project_id), auth_url=repo_url)
 

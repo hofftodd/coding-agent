@@ -13,6 +13,10 @@ from typing import Protocol
 
 from foreman.core.models import Project, Task
 
+# Exit status an executor's command uses for "this can't work as configured"
+# (e.g. its tool isn't installed): the task blocks instead of being retried.
+EXIT_CONFIG = 78
+
 
 @dataclass
 class ExecutorInvocation:

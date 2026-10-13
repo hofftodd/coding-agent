@@ -4,7 +4,7 @@ foreman up            run api + orchestrator + supervisor (separate processes)
 foreman api           HTTP API and dashboard
 foreman orchestrator  scheduler and task runner
 foreman supervisor    stop / E-stop enforcement
-foreman build-image   build the executor base image
+foreman build-image   build the executor base image (--with-aider adds Aider)
 """
 
 from __future__ import annotations
@@ -73,7 +73,8 @@ def _build_image() -> None:
     root = Path(__file__).resolve().parents[2]
     ctx = root / "docker" / "executor-base"
     tag = get_settings().executor_image
-    sys.exit(subprocess.call(["docker", "build", "-t", tag, str(ctx)]))
+    extra = ["--build-arg", "WITH_AIDER=1"] if "--with-aider" in sys.argv[2:] else []
+    sys.exit(subprocess.call(["docker", "build", *extra, "-t", tag, str(ctx)]))
 
 
 COMMANDS = {
@@ -88,6 +89,7 @@ COMMANDS = {
 def main() -> None:
     parser = argparse.ArgumentParser(prog="foreman")
     parser.add_argument("command", choices=sorted(COMMANDS))
+    parser.add_argument("--with-aider", action="store_true", help="build-image: include Aider")
     args = parser.parse_args()
     COMMANDS[args.command]()
 

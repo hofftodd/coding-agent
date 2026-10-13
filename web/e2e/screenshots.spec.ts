@@ -98,6 +98,15 @@ test("capture README screenshots", async ({ page, request }) => {
   await expect.poll(() => state(request, tests), { timeout: 60_000 }).toMatch(/^failed/);
   await expect.poll(() => state(request, cli), { timeout: 60_000 }).toBe("running");
 
+  // Inference nodes (both answer via the scripted model server)
+  for (const n of [
+    { name: "mac-studio", capacity: 2, context_window: 131072 },
+    { name: "r9700-mini", capacity: 1, context_window: 32768 },
+  ]) {
+    const r = await request.post("/api/nodes", { data: { ...n, base_url: process.env.FAKE_LLM_URL } });
+    await request.post(`/api/nodes/${((await r.json()) as { id: number }).id}/check`);
+  }
+
   // 1. Projects overview
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "todo-api" })).toBeVisible();
@@ -108,6 +117,17 @@ test("capture README screenshots", async ({ page, request }) => {
   await expect(page.locator(".column").nth(1)).toContainText("Parse CLI arguments");
   await page.waitForTimeout(3000);
   await shot(page, "project-board");
+
+  // 2b. Progress over time
+  const progress = page.locator("section.card", { has: page.getByRole("heading", { name: "Progress" }) });
+  await expect(progress.locator("svg")).toBeVisible();
+  await progress.screenshot({ path: `${OUT}/project-progress.png` });
+
+  // 2c. Nodes with their load
+  await page.goto("/nodes");
+  await expect(page.getByText("mac-studio")).toBeVisible();
+  await expect(page.locator(".dot.ok").first()).toBeVisible();
+  await shot(page, "nodes");
 
   // 3. Live log of the running task
   await page.goto(`/tasks/${cli}`);

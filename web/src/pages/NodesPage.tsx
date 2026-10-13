@@ -1,12 +1,21 @@
 import { useState } from "react";
-import { del, post } from "../api";
+import { del, patch, post } from "../api";
 import { ActionButton, ErrorNote, Field, fmtTime } from "../components";
 import { usePoll } from "../hooks";
 import type { Node } from "../types";
 
 export default function NodesPage() {
   const { data: nodes, error, reload } = usePoll<Node[]>("/api/nodes", 5000);
-  const empty = { name: "", provider: "openai", base_url: "", api_key: "", capacity: 1, context_window: 32768 };
+  const empty = {
+    name: "",
+    provider: "openai",
+    base_url: "",
+    api_key: "",
+    capacity: 1,
+    context_window: 32768,
+    price_in: 0,
+    price_out: 0,
+  };
   const [f, setF] = useState(empty);
   const [formError, setFormError] = useState("");
   const [checkErrors, setCheckErrors] = useState<Record<number, string>>({});
@@ -36,6 +45,12 @@ export default function NodesPage() {
               {n.context_window.toLocaleString()} ctx · checked {fmtTime(n.last_checked)}{" "}
               {n.has_api_key && "· api key set"}
             </div>
+            <NodeLoad n={n} />
+            {(n.price_in > 0 || n.price_out > 0) && (
+              <div className="small">
+                ${n.price_in} / ${n.price_out} per million tokens in / out
+              </div>
+            )}
             <div className="small">{n.models.length ? n.models.join(", ") : <span className="muted">no models listed</span>}</div>
             <ErrorNote error={checkErrors[n.id] ?? ""} />
             <div className="actions">
@@ -47,6 +62,17 @@ export default function NodesPage() {
                 }}
               >
                 Check
+              </ActionButton>
+              <ActionButton
+                onClick={async () => {
+                  const v = prompt(`Capacity for ${n.name} (concurrent tasks and planner calls)`, String(n.capacity));
+                  if (v && Number(v) >= 1) {
+                    await patch(`/api/nodes/${n.id}`, { capacity: Number(v) });
+                    reload();
+                  }
+                }}
+              >
+                Capacity…
               </ActionButton>
               <ActionButton kind="danger" onClick={async () => { if (confirm(`Remove ${n.name}?`)) { await del(`/api/nodes/${n.id}`); reload(); } }}>
                 Remove
@@ -100,13 +126,36 @@ export default function NodesPage() {
           <Field label="API key" hint="Optional">
             <input type="password" value={f.api_key} onChange={(e) => setF({ ...f, api_key: e.target.value })} />
           </Field>
-          <Field label="Capacity" hint="Concurrent tasks this node can serve">
+          <Field label="Capacity" hint="Concurrent tasks and planner calls this node can serve">
             <input type="number" min={1} value={f.capacity} onChange={(e) => setF({ ...f, capacity: Number(e.target.value) })} />
+          </Field>
+          <Field label="Price in (USD / million tokens)" hint="0 for local nodes; priced nodes count against spend caps">
+            <input type="number" min={0} step="any" value={f.price_in} onChange={(e) => setF({ ...f, price_in: Number(e.target.value) })} />
+          </Field>
+          <Field label="Price out (USD / million tokens)">
+            <input type="number" min={0} step="any" value={f.price_out} onChange={(e) => setF({ ...f, price_out: Number(e.target.value) })} />
           </Field>
         </div>
         <ErrorNote error={formError} />
         <button className="btn primary">Add node</button>
       </form>
+    </div>
+  );
+}
+
+function NodeLoad({ n }: { n: Node }) {
+  const pct = Math.min(100, (n.active / n.capacity) * 100);
+  return (
+    <div className="node-load">
+      <div className="meter-label">
+        <span>
+          {n.active} of {n.capacity} slot{n.capacity === 1 ? "" : "s"} busy
+        </span>
+        <span className="muted">{n.waiting ? `${n.waiting} waiting` : "nothing waiting"}</span>
+      </div>
+      <div className="meter-bar">
+        <div className={`meter-fill ${pct >= 100 ? "warm" : ""}`} style={{ width: `${pct}%` }} />
+      </div>
     </div>
   );
 }

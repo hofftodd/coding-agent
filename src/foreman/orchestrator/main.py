@@ -1,11 +1,13 @@
 """Orchestrator process: picks ready tasks and runs them.
 
-M1 scheduling rules:
+Scheduling rules:
 - nothing starts while E-stop is active;
 - a paused project, or a task on hold, never starts;
 - a task starts only when all its dependencies are done;
 - at most one active task per project (tasks merge into one milestone branch);
-- a node never runs more tasks than its capacity.
+- a node never runs more work (task attempts plus planner calls) than its capacity,
+  and a node that failed its last health check gets none;
+- paid (priced) nodes get no work for a project at its spend cap.
 """
 
 from __future__ import annotations
@@ -19,8 +21,9 @@ from typing import Any
 
 from sqlmodel import col, select
 
+from foreman import gitops
 from foreman.config import get_settings
-from foreman.core import gates
+from foreman.core import gates, spend
 from foreman.core.models import (
     JobKind,
     JobState,
@@ -55,7 +58,9 @@ log = logging.getLogger("foreman.orchestrator")
 
 
 def recover() -> None:
-    """After a restart no task may be left silently 'running' (NFR-2)."""
+    """After a restart no task may be left silently 'running' (NFR-2), and no repository,
+    acceptance check or planner job half-done."""
+    recover_projects()
     with session() as s:
         runs = s.exec(select(TaskRun).where(TaskRun.state == RunState.RUNNING)).all()
     for run in runs:
@@ -85,6 +90,30 @@ def recover() -> None:
         assert job.id is not None
         if finish_job(job.id, (JobState.RUNNING,), JobState.FAILED, "orchestrator restarted"):
             JobRunner(job.id)._after_failure("orchestrator restarted; send your message again")
+
+
+def recover_projects() -> None:
+    with session() as s:
+        projects = s.exec(select(Project)).all()
+    for p in projects:
+        assert p.id is not None
+        if p.acceptance_handle:
+            # The check was cut off: kill what's left; it runs again (no result recorded).
+            kill_handle(p.acceptance_handle, 0)
+            with session() as s:
+                row = s.get(Project, p.id)
+                if row is not None:
+                    row.acceptance_handle = ""
+                    s.add(row)
+                    s.commit()
+            emit(p.id, None, "system", "acceptance check interrupted by a restart; re-running")
+        try:
+            actions = gitops.recover_repo(p.id, p.milestone_branch)
+        except (gitops.GitError, OSError) as e:
+            log.warning("project %s: repository recovery failed: %s", p.id, e)
+            continue
+        if actions:
+            emit(p.id, None, "system", "after restart: " + "; ".join(actions))
 
 
 def node_load() -> dict[int, int]:
@@ -178,6 +207,8 @@ def pick_ready() -> list[tuple[Task, int | None, str]]:
             needs_node = False
         if needs_node and nid is not None:
             if not node_available(nodes.get(nid), load):
+                continue
+            if spend.priced(nodes.get(nid)) and spend.over_cap(p):
                 continue
             load[nid] = load.get(nid, 0) + 1
         busy_projects.add(t.project_id)
@@ -303,12 +334,16 @@ class Orchestrator:
             if nid is not None:
                 if not node_available(nodes.get(nid), load):
                     continue
+                if spend.priced(nodes.get(nid)) and spend.over_cap(projects[job.project_id]):
+                    continue
                 load[nid] = load.get(nid, 0) + 1
             busy.add(job.project_id)
             self.jobs[job.project_id] = asyncio.create_task(JobRunner(job.id).run())
 
     def start_health_checks(self) -> None:
-        """Check every node in the background, every NODE_CHECK_S seconds."""
+        """Check every node in the background, every NODE_CHECK_S seconds (0 = never)."""
+        if self.settings.node_check_s <= 0:
+            return  # disabled (tests)
         if self._health is not None and not self._health.done():
             return
         if time.monotonic() - self._last_health < self.settings.node_check_s:
