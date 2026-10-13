@@ -17,9 +17,11 @@ from pathlib import Path
 
 from foreman import gitops
 from foreman.config import get_settings
+from foreman.core import gates, watchdog
 from foreman.core.contextpack import build_pack
-from foreman.core.models import Node, Project, RunState, Task, TaskRun, TaskState
+from foreman.core.models import GateKind, Node, Project, RunState, Task, TaskRun, TaskState
 from foreman.core.state import ACTIVE_STATES, emit, finish_run, stop_requested, transition
+from foreman.core.watchdog import failure_signature
 from foreman.db import session
 from foreman.executors import get_executor
 from foreman.sandbox import Proc, Runtime, StepSpec, get_runtime, kill_handle
@@ -33,7 +35,25 @@ class Stopped(Exception):
 
 
 class StepFailed(Exception):
-    pass
+    """The attempt failed. `output` is the failing step's tail, for the signature."""
+
+    kind = "executor"
+
+    def __init__(self, reason: str, output: str = "", kind: str = ""):
+        super().__init__(reason)
+        self.output = output
+        if kind:
+            self.kind = kind
+
+
+class ConfigError(StepFailed):
+    """A configuration problem (no node, bad executor...): retrying can't help."""
+
+    kind = "config"
+
+
+class WatchdogTrip(StepFailed):
+    kind = "watchdog"
 
 
 def resolve_executor(project: Project, task: Task) -> tuple[str, int | None, str]:
@@ -45,10 +65,19 @@ def resolve_executor(project: Project, task: Task) -> tuple[str, int | None, str
 
 
 class TaskRunner:
-    def __init__(self, task_id: int, run_id: int, runtime: Runtime | None = None):
+    def __init__(
+        self,
+        task_id: int,
+        run_id: int,
+        runtime: Runtime | None = None,
+        gateway_url: str = "",
+    ):
         self.task_id = task_id
         self.run_id = run_id
         self.runtime = runtime or get_runtime()
+        # Base URL of the model gateway as seen from where the executor runs.
+        self.gateway_url = gateway_url
+        self._tail: list[str] = []
         self.settings = get_settings()
         self.run_dir = self.settings.runs_dir / str(run_id)
         with session() as s:
@@ -113,11 +142,34 @@ class TaskRunner:
             await asyncio.to_thread(kill_handle, proc.handle, 0)
             await proc.wait()
             raise
+        self._tail = []
+        watcher = asyncio.create_task(self._watch(proc.handle))
         try:
-            return await asyncio.wait_for(self._pump(proc, kind, name), timeout_s)
+            code = await asyncio.wait_for(self._pump(proc, kind, name), timeout_s)
         except TimeoutError:
             await asyncio.to_thread(kill_handle, proc.handle)
-            raise StepFailed(f"{name} timed out after {int(timeout_s)}s") from None
+            raise WatchdogTrip(
+                f"{name} timed out after {int(timeout_s)}s", "\n".join(self._tail)
+            ) from None
+        finally:
+            watcher.cancel()
+        reason = self._watchdog_reason()
+        if reason:
+            raise WatchdogTrip(f"watchdog: {reason}", reason)
+        return code
+
+    def _watchdog_reason(self) -> str:
+        with session() as s:
+            run = s.get(TaskRun, self.run_id)
+            return run.watchdog if run else ""
+
+    async def _watch(self, handle: str) -> None:
+        """Kill the step as soon as the gateway trips the watchdog for this run."""
+        while True:
+            await asyncio.sleep(0.5)
+            if self._watchdog_reason():
+                await asyncio.to_thread(kill_handle, handle)
+                return
 
     async def _pump(self, proc: Proc, kind: str, name: str) -> int:
         task, _ = self._load()
@@ -143,6 +195,7 @@ class TaskRunner:
             async for line in proc.lines():
                 log.write(line + "\n")
                 buf.append(line)
+                self._tail = [*self._tail[-79:], line]
                 if len(buf) >= LOG_BATCH or time.monotonic() - last > LOG_FLUSH_S:
                     flush()
             flush()
@@ -163,11 +216,26 @@ class TaskRunner:
                 )
             finish_run(self.run_id, RunState.STOPPED, f"stopped ({e})")
         except StepFailed as e:
-            self._fail(str(e))
+            self._fail(str(e), e.output, e.kind)
         except Exception as e:  # noqa: BLE001 - any crash fails the task, never wedges it
-            self._fail(f"internal error: {type(e).__name__}: {e}")
+            self._fail(f"internal error: {type(e).__name__}: {e}", kind="internal")
+        self._after()
 
-    def _fail(self, reason: str) -> None:
+    def _after(self) -> None:
+        """Next step once the attempt is over: escalate a failure. (Successes queue their
+        plan review in merge_task.)"""
+        from foreman.orchestrator import escalation
+
+        task, _ = self._load()
+        try:
+            if task.state == TaskState.FAILED:
+                escalation.after_failure(self.task_id, self.run_id)
+        except Exception:  # noqa: BLE001 - never let bookkeeping crash the runner
+            import logging
+
+            logging.getLogger("foreman.runner").exception("post-run step failed")
+
+    def _fail(self, reason: str, output: str = "", kind: str = "executor") -> None:
         task, _ = self._load()
         if stop_requested(task.project_id, self.task_id, self.started_at):
             # The failure is a consequence of the stop (e.g. killed process): report the stop.
@@ -176,6 +244,13 @@ class TaskRunner:
             )
             finish_run(self.run_id, RunState.STOPPED, "stop requested by user")
             return
+        with session() as s:
+            run = s.get(TaskRun, self.run_id)
+            if run is not None:
+                run.error_sig = failure_signature(output or reason)
+                run.failure_kind = kind
+                s.add(run)
+                s.commit()
         finish_run(self.run_id, RunState.FAILED, reason)
         transition(
             self.task_id, (TaskState.RUNNING, TaskState.VALIDATING), TaskState.FAILED, reason
@@ -198,10 +273,18 @@ class TaskRunner:
             with session() as s:
                 node = s.get(Node, node_id)
         if executor.needs_node and (node is None or not model):
-            raise StepFailed("no executor node/model configured for this project or task")
+            raise ConfigError("no executor node/model configured for this project or task")
         if executor.needs_node and node is not None and node.provider != "openai":
             # Cloud keys must never enter a sandbox (NFR-5).
-            raise StepFailed(f"node {node.name} ({node.provider}) cannot run executors")
+            raise ConfigError(f"node {node.name} ({node.provider}) cannot run executors")
+        endpoint = ""
+        if executor.needs_node:
+            if not self.gateway_url:
+                raise ConfigError("the model gateway is not running")
+            with session() as s:
+                run = s.get(TaskRun, self.run_id)
+                assert run is not None
+                endpoint = f"{self.gateway_url}/g/{run.gateway_token}/v1"
         pack = await asyncio.to_thread(
             build_pack,
             project,
@@ -212,10 +295,11 @@ class TaskRunner:
         )
         if pack.over_budget and executor.needs_node:
             raise StepFailed(
-                f"context pack ~{pack.tokens} tokens exceeds budget {pack.budget}; split the task"
+                f"context pack ~{pack.tokens} tokens exceeds budget {pack.budget}; split the task",
+                kind="too_big",
             )
         (self.run_dir / "context_pack.md").write_text(pack.text)
-        inv = executor.prepare(project, task, node, model, self.run_dir / "ctl", pack.text)
+        inv = executor.prepare(project, task, endpoint, model, self.run_dir / "ctl", pack.text)
         self._emit(
             "system", f"executor {kind} starting" + (f" on {node.name} / {model}" if node else "")
         )
@@ -223,14 +307,24 @@ class TaskRunner:
         task = self._check()
         await asyncio.to_thread(gitops.commit_all, clone, f"Task {self.task_id}: {task.title}")
         if code != 0:
-            raise StepFailed(f"executor exited with status {code}")
+            raise StepFailed(f"executor exited with status {code}", "\n".join(self._tail))
 
-        # 2. Scope fence
+        # 2. Scope fence and diff size (FR-5.3)
         files = await asyncio.to_thread(gitops.changed_files, clone)
         outside = gitops.out_of_scope(files, task.allowed_globs)
         if outside:
-            raise StepFailed(f"changed files outside allowed scope: {', '.join(outside)}")
-        self._emit("diff", f"{len(files)} file(s) changed", files=files)
+            raise WatchdogTrip(f"changed files outside allowed scope: {', '.join(outside)}")
+        lines = await asyncio.to_thread(gitops.diff_size, clone)
+        with session() as s:
+            run = s.get(TaskRun, self.run_id)
+            assert run is not None
+            run.diff_lines = lines
+            s.add(run)
+            s.commit()
+        max_lines = watchdog.limit(project, "max_diff_lines")
+        if lines > max_lines:
+            raise WatchdogTrip(f"diff too large: {lines} lines changed (limit {max_lines})")
+        self._emit("diff", f"{len(files)} file(s) changed, {lines} lines", files=files)
 
         if task.hold:
             transition(self.task_id, (TaskState.RUNNING,), TaskState.PAUSED, "paused after execute")
@@ -248,7 +342,9 @@ class TaskRunner:
             self._emit("test", f"$ {cmd}", step=name)
             code = await self._step(name, ["bash", "-lc", cmd], {}, "test", task.timeout_s)
             if code != 0:
-                raise StepFailed(f"{name} failed (exit {code}): {cmd}")
+                raise StepFailed(
+                    f"{name} failed (exit {code}): {cmd}", "\n".join(self._tail), kind="validation"
+                )
             self._emit("test", f"{name} passed", step=name, passed=True)
 
         task = self._check()
@@ -259,23 +355,27 @@ class TaskRunner:
             finish_run(self.run_id, RunState.SUCCEEDED, "paused after validation")
             return
 
-        # 4. Merge
+        # 4. Merge, or wait for the user's approval (task_merge checkpoint)
+        if gates.enabled(project, "task_merge"):
+            transition(
+                self.task_id,
+                (TaskState.VALIDATING,),
+                TaskState.AWAITING_MERGE,
+                "validated; waiting for merge approval",
+            )
+            finish_run(self.run_id, RunState.SUCCEEDED, "awaiting merge approval")
+            gates.open_gate(
+                task.project_id,
+                GateKind.TASK_MERGE,
+                f"Merge task {task.key or self.task_id}: {task.title}?",
+                "The task passed its checks. Review the diff, then approve the merge or reject it.",
+                task_id=self.task_id,
+            )
+            return
         try:
-            await asyncio.to_thread(gitops.merge_task, task.project_id, self.task_id, task.title)
+            await asyncio.to_thread(merge_task, self.task_id)
         except gitops.GitError as e:
-            raise StepFailed(str(e)) from e
-        self._emit("system", f"merged into {project.milestone_branch}")
-        if project.push_after_merge:
-            try:
-                await asyncio.to_thread(
-                    gitops.push, task.project_id, project.repo_url, project.milestone_branch
-                )
-                self._emit("system", f"pushed {project.milestone_branch}")
-            except gitops.GitError as e:
-                # The merge stands locally; a failed push must not fail the task.
-                self._emit("system", f"push failed: {e}")
-
-        transition(self.task_id, (TaskState.VALIDATING,), TaskState.DONE)
+            raise StepFailed(str(e), kind="merge") from e
         finish_run(self.run_id, RunState.SUCCEEDED)
 
     def _previous_failure(self) -> str:
@@ -290,6 +390,34 @@ class TaskRunner:
         if prev and prev.state in (RunState.FAILED, RunState.STOPPED) and prev.reason:
             return prev.reason
         return ""
+
+
+def merge_task(task_id: int) -> None:
+    """Merge a validated task into the milestone branch and mark it done.
+
+    Used by the runner, and by the orchestrator when a task_merge checkpoint is
+    approved. Raises GitError on conflict.
+    """
+    with session() as s:
+        task = s.get(Task, task_id)
+        assert task is not None
+        project = s.get(Project, task.project_id)
+        assert project is not None
+    gitops.merge_task(task.project_id, task_id, task.title)
+    emit(task.project_id, task_id, "system", f"merged into {project.milestone_branch}")
+    if project.push_after_merge:
+        try:
+            gitops.push(task.project_id, project.repo_url, project.milestone_branch)
+            emit(task.project_id, task_id, "system", f"pushed {project.milestone_branch}")
+        except gitops.GitError as e:
+            # The merge stands locally; a failed push must not fail the task.
+            emit(task.project_id, task_id, "system", f"push failed: {e}")
+    # Queue the plan review *before* marking the task done, so the scheduler never
+    # starts the next task in between (replanning happens between tasks).
+    from foreman.orchestrator.replan import queue_review
+
+    queue_review(task.project_id, f"task {task.key or task_id} is done", task_id)
+    transition(task_id, (TaskState.VALIDATING, TaskState.AWAITING_MERGE), TaskState.DONE)
 
 
 def log_path(run_id: int, step: str) -> Path:

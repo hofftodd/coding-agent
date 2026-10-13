@@ -3,7 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { control, post } from "../api";
 import { ActionButton, ErrorNote, EventLog, StateBadge, StopButton, fmtDuration, fmtTime } from "../components";
 import { useEventStream, usePoll } from "../hooks";
-import type { Task } from "../types";
+import type { Project, Task } from "../types";
 
 type Tab = "log" | "diff" | "details";
 
@@ -71,7 +71,7 @@ function Details({ t }: { t: Task }) {
       <h3>Runs</h3>
       <table className="runs">
         <thead>
-          <tr><th>#</th><th>State</th><th>Started</th><th>Duration</th><th>Model</th><th>Reason</th></tr>
+          <tr><th>#</th><th>State</th><th>Started</th><th>Duration</th><th>Model</th><th>Calls</th><th>Tokens</th><th>Reason</th></tr>
         </thead>
         <tbody>
           {(t.runs ?? []).slice().reverse().map((r) => (
@@ -81,12 +81,68 @@ function Details({ t }: { t: Task }) {
               <td>{fmtTime(r.started_at)}</td>
               <td>{fmtDuration(r.started_at, r.ended_at)}</td>
               <td className="mono small">{r.model || "—"}</td>
+              <td className="small">{r.model_requests}</td>
+              <td className="small">{(r.tokens_in + r.tokens_out).toLocaleString()}</td>
               <td className="small">{r.reason}</td>
             </tr>
           ))}
         </tbody>
       </table>
     </div>
+  );
+}
+
+function Meter({ label, value, max, fmt = (n: number) => n.toLocaleString() }: {
+  label: string;
+  value: number;
+  max: number;
+  fmt?: (n: number) => string;
+}) {
+  const pct = Math.min(100, max ? (100 * value) / max : 0);
+  return (
+    <div className="meter">
+      <div className="meter-label">
+        <span>{label}</span>
+        <span className="muted">
+          {fmt(value)} / {fmt(max)}
+        </span>
+      </div>
+      <div className="meter-bar">
+        <div className={`meter-fill ${pct >= 90 ? "hot" : pct >= 70 ? "warm" : ""}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+const LEVELS = ["retrying", "split requested", "on the escalation model"];
+
+function Watchdog({ t }: { t: Task }) {
+  const { data: project } = usePoll<Project>(`/api/projects/${t.project_id}`, 10000);
+  const run = t.runs?.[t.runs.length - 1];
+  const w = project?.watchdog_effective;
+  if (!run || !w) return null;
+  return (
+    <section className="card watchdog">
+      <div className="row">
+        <h2>Watchdog</h2>
+        <span className="small muted">
+          {LEVELS[t.escalation_level] ?? ""}
+          {t.level_failures > 0 && ` · ${t.level_failures} failure(s) at this level`}
+        </span>
+      </div>
+      <div className="meters">
+        <Meter label="Model calls" value={run.model_requests} max={w.max_requests} />
+        <Meter label="Tokens" value={run.tokens_in + run.tokens_out} max={w.max_tokens} />
+        <Meter label="Lines changed" value={run.diff_lines} max={w.max_diff_lines} />
+        <Meter
+          label="Time"
+          value={Math.round((run.ended_at ?? Date.now() / 1000) - run.started_at)}
+          max={t.timeout_s}
+          fmt={(n) => `${Math.round(n / 60)}m`}
+        />
+      </div>
+      {run.watchdog && <div className="error-note">Stopped by the watchdog: {run.watchdog}</div>}
+    </section>
   );
 }
 
@@ -117,6 +173,11 @@ export default function TaskPage() {
             {t.hold && <span className="warn"> · on hold (will park after current step)</span>}
           </div>
           {t.reason && t.state !== "done" && <div className="reason">{t.reason}</div>}
+          {t.parent_id && (
+            <div className="small muted">
+              split from <Link to={`/tasks/${t.parent_id}`}>#{t.parent_id}</Link>
+            </div>
+          )}
         </div>
         <div className="actions">
           {(active || t.state === "queued") &&
@@ -157,6 +218,7 @@ export default function TaskPage() {
         </div>
       </div>
 
+      <Watchdog t={t} />
       <div className="tabs">
         {(["log", "diff", "details"] as Tab[]).map((x) => (
           <button key={x} className={tab === x ? "active" : ""} onClick={() => setTab(x)}>

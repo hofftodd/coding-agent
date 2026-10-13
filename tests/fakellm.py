@@ -64,6 +64,7 @@ class FakeLLM:
         chunk_delay: float = 0.0,
     ):
         self.requests: list[dict[str, Any]] = []
+        self.headers: list[dict[str, str]] = []
         self.planner = planner
         self.chunk_delay = chunk_delay
         self.disconnected = threading.Event()
@@ -101,6 +102,7 @@ class FakeLLM:
                     return False
 
             def do_GET(self) -> None:  # noqa: N802
+                outer.headers.append(dict(self.headers.items()))
                 if self.path.split("?", 1)[0].rstrip("/").endswith("/models"):
                     self._json(200, {"object": "list", "data": [{"id": MODEL, "object": "model"}]})
                 else:
@@ -110,6 +112,7 @@ class FakeLLM:
                 length = int(self.headers.get("Content-Length", 0))
                 req = json.loads(self.rfile.read(length) or b"{}")
                 outer.requests.append(req)
+                outer.headers.append(dict(self.headers.items()))
                 path = self.path.split("?", 1)[0].rstrip("/")
                 if path.endswith("/chat/completions"):
                     self._openai(req)

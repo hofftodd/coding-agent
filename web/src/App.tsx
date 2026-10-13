@@ -3,6 +3,7 @@ import { NavLink, Route, Routes } from "react-router-dom";
 import { control, getToken, setToken } from "./api";
 import { ActionButton, StopButton } from "./components";
 import { usePoll } from "./hooks";
+import InboxPage from "./pages/InboxPage";
 import NodesPage from "./pages/NodesPage";
 import ProjectPage from "./pages/ProjectPage";
 import ProjectsPage from "./pages/ProjectsPage";
@@ -60,6 +61,10 @@ export default function App() {
           <NavLink to="/" end>
             Projects
           </NavLink>
+          <NavLink to="/inbox">
+            Needs you
+            {!!sys?.pending_gates && <span className="count">{sys.pending_gates}</span>}
+          </NavLink>
           <NavLink to="/nodes">Nodes</NavLink>
         </nav>
         <div className="spacer" />
@@ -93,6 +98,7 @@ export default function App() {
             <Route path="/projects/:id" element={<ProjectPage />} />
             <Route path="/tasks/:id" element={<TaskPage />} />
             <Route path="/nodes" element={<NodesPage />} />
+            <Route path="/inbox" element={<InboxPage />} />
             <Route path="*" element={<p>Not found.</p>} />
           </Routes>
         )}

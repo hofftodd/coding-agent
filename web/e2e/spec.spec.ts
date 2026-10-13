@@ -57,7 +57,7 @@ test("specify, review the plan, execute", async ({ page, request }) => {
 
   // Approve the plan -> tasks run.
   await page.getByRole("button", { name: /Approve plan/ }).click();
-  await expect(page.locator(".step.current")).toHaveText(/Execute/);
+  await expect(page.locator(".step.current")).toHaveText(/Execute|Done/);
   await expect(page.locator(".column").nth(3)).toContainText("Command-line entry point", { timeout: 60_000 });
   await expect(page.locator(".column").nth(3).locator(".task-card")).toHaveCount(2);
 });

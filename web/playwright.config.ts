@@ -4,6 +4,8 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "e2e",
   timeout: 120_000,
+  // One shared backend, and E-STOP is global: run the tests one at a time.
+  workers: 1,
   use: {
     baseURL: process.env.FOREMAN_URL ?? "http://127.0.0.1:8700",
     screenshot: "only-on-failure",

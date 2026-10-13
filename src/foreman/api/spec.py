@@ -28,6 +28,7 @@ from foreman.core.models import (
     JobState,
     Node,
     PlannerJob,
+    PlanRevision,
     Project,
     ProjectPhase,
     SpecMessage,
@@ -140,6 +141,19 @@ def get_spec(project_id: int) -> dict[str, Any]:
         "active_job": active.model_dump() if active else None,
         "last_job": last_job.model_dump() if last_job else None,
     }
+
+
+@router.get("/api/projects/{project_id}/revisions")
+def list_revisions(project_id: int) -> list[PlanRevision]:
+    _project(project_id)
+    with session() as s:
+        return list(
+            s.exec(
+                select(PlanRevision)
+                .where(PlanRevision.project_id == project_id)
+                .order_by(col(PlanRevision.id).desc())
+            ).all()
+        )
 
 
 @router.get("/api/projects/{project_id}/jobs")
@@ -285,7 +299,7 @@ def approve_plan(project_id: int) -> dict[str, Any]:
             row.updated_at = now()
             s.add(row)
         s.commit()
-    _set_phase(p, ProjectPhase.EXECUTE)
+    _set_phase(p, ProjectPhase.EXECUTE, baseline_tasks=len(proposed))
     emit(
         project_id,
         None,

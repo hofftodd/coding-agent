@@ -79,6 +79,8 @@ def scripted(chat: str = CHAT_REPLY, decompose: list[Any] | Callable[[int], Any]
     calls = {"decompose": 0}
 
     def planner(req: dict[str, Any]) -> str:
+        if "You review the plan" in system_text(req):
+            return json.dumps({"summary": "on track", "ops": []})
         if "Break the approved plan" in system_text(req):
             calls["decompose"] += 1
             out = decompose(calls["decompose"]) if callable(decompose) else decompose
@@ -426,3 +428,41 @@ async def test_plan_approval_rejects_dependencies_on_dropped_tasks(client, origi
     client.post(f"/api/tasks/{t1.id}/discard")
     r = client.post(f"/api/projects/{pid}/plan/approve")
     assert r.status_code == 400 and "dropped tasks: T2" in r.json()["detail"]
+
+
+async def test_runs_to_done_without_any_input_when_optional_gates_are_off(client, origin, llm):
+    """V7.1: after spec approval, three tasks run, are reviewed, pass acceptance and the
+    project finishes without a single checkpoint."""
+    chat_reply = CHAT_REPLY.replace("sh tests/acceptance/check.sh", "test -f c.txt")
+    three = [
+        {**GOOD_TASKS[0], "allowed_files": ["a.txt"]},
+        {**GOOD_TASKS[1], "allowed_files": ["b.txt"]},
+        {
+            "key": "T3",
+            "title": "Third",
+            "allowed_files": ["c.txt"],
+            "validation_cmd": "true",
+            "deps": ["T2"],
+        },
+    ]
+    llm.planner = scripted(chat=chat_reply, decompose=three)
+    p = spec_project(client, origin, llm, gates={"plan_approval": False, "milestone": False})
+    pid = p["id"]
+    orch = Orchestrator()
+    await chat(client, orch, pid, "Build it.")
+    assert client.post(f"/api/projects/{pid}/spec/approve").status_code == 200
+    await drive(orch, lambda: project(pid).phase == ProjectPhase.EXECUTE)
+    # The shell executor stands in for the coding agent: each task writes its file.
+    with session() as s:
+        for t in s.exec(select(Task).where(Task.project_id == pid)):
+            t.executor_script = f"echo ok > {t.allowed_globs[0]}"
+            s.add(t)
+        s.commit()
+    await drive(orch, lambda: project(pid).phase == ProjectPhase.DONE, timeout=60)
+    with session() as s:
+        from foreman.core.models import Gate, PlanRevision
+
+        assert s.exec(select(Gate).where(Gate.project_id == pid)).all() == []
+        reviews = s.exec(select(PlanRevision).where(PlanRevision.project_id == pid)).all()
+    assert len(reviews) == 3  # one after each task
+    assert project(pid).acceptance_passed and project(pid).baseline_tasks == 3

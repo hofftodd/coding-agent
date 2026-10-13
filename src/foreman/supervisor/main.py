@@ -80,6 +80,12 @@ def apply_control(control: Control, pool: ThreadPoolExecutor) -> str:
         )
     kills = [pool.submit(kill_handle, r.handle) for r in runs if r.handle]
     results = [f.result() for f in kills]
+    if control.scope != ControlScope.TASK:
+        from foreman.orchestrator.milestone import kill_acceptance
+
+        results += kill_acceptance(
+            control.target_id if control.scope == ControlScope.PROJECT else None
+        )
 
     # 3. Record. These may wait on foreman.db's write lock.
     if control.scope == ControlScope.PROJECT:
@@ -157,6 +163,8 @@ def sweep_orphans() -> None:
             str(r.id) for r in s.exec(select(TaskRun).where(TaskRun.state == RunState.RUNNING))
         }
     for name, run_id in containers.items():
+        if not run_id:
+            continue  # acceptance checks carry no run; Stop kills them by project
         if run_id not in open_runs:
             log.warning("killing orphan container %s (run %s)", name, run_id)
             kill_handle(f"docker:{name}", 2)

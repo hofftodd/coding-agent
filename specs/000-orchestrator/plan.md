@@ -1,6 +1,6 @@
 # Plan 000 — Local Agent Coding Orchestrator
 
-Status: **In progress** — M1, M2 done · Implements: [spec.md](spec.md)
+Status: **In progress** — M1, M2, M3 done · Implements: [spec.md](spec.md)
 
 ## 1. Stack
 
@@ -123,7 +123,7 @@ and default role bindings.
 - Validation tests generation; Phase 1 approval gate.
 - Decomposition with size enforcement and context packs.
 
-### M3 — Autonomy
+### M3 — Autonomy ✅
 - Watchdog rules + escalation ladder.
 - Replanner with plan revisions, growth cap, spec-change gate.
 - Configurable gates + "Needs you" inbox + ntfy notifications.
@@ -255,3 +255,70 @@ Design changes made while building M1 (spec updated where relevant):
 - Planner jobs don't count against node capacity.
 - Token counts are estimates (chars/4), not tokenizer-exact.
 - Watchdog, replanning after each task, and the remaining checkpoints are M3.
+
+## 10. M3 implementation notes
+
+- **Model gateway** (`gateway.py`, served by the orchestrator on
+  `FOREMAN_GATEWAY_PORT`). Each run gets a secret URL `/g/<token>/v1` as the
+  executor's base URL; the gateway forwards to the node, adds the node's API
+  key host-side (NFR-5 for node keys), counts requests and tokens (server
+  usage when reported, else estimates), detects identical responses, and
+  refuses calls for stopped, finished or tripped runs. Because the gateway now
+  connects to nodes, node URLs must be reachable from the orchestrator host
+  (no more `host.docker.internal` for node URLs).
+- **Watchdog** (FR-5.1–5.4): per attempt `max_requests`, `max_tokens`,
+  `max_diff_lines`, `repeat_limit`, plus the task timeout. A trip is recorded
+  on the run; the runner polls for it and kills the step. Scope violations and
+  oversized diffs are watchdog failures too. Regression is still exit-code
+  based (the project test command must pass), not per-test counting.
+- **Failure signatures** normalise numbers, hashes, temp paths and whitespace,
+  so "the same failure" survives timing and random-id noise.
+- **Escalation** (FR-5.5, `orchestrator/escalation.py`): retry (fresh session,
+  told the previous failure) up to `max_retries` → split via the planner
+  (once per task, max depth 2; dependents are rewired to all children) →
+  escalation-model binding → blocked + inbox item. Configuration errors block
+  immediately; an over-budget context pack goes straight to splitting; the
+  same signature `repeat_limit` times skips remaining retries.
+  `watchdog.escalation = false` restores plain failures.
+- **Replanning** (FR-6, `orchestrator/replan.py`): a REVIEW planner job after
+  every completed task. The review is queued *before* the task is marked done
+  and the scheduler holds the project's next task while it is pending, so
+  replanning really happens between tasks. Ops are validated (only
+  queued/proposed/blocked tasks, reasons required, size-checked new tasks);
+  growth over `growth_cap_pct` of `baseline_tasks` and the optional
+  `replan_approval` checkpoint gate a revision; spec changes always gate and,
+  when approved, are appended to spec.md.
+- **Checkpoints** (FR-7, `core/gates.py`): one `Gate` table behind the
+  "Needs you" inbox. The API records decisions; the orchestrator carries them
+  out (single writer to the repositories). ntfy notifications on new gates.
+- **Milestone**: acceptance runs once per milestone commit in the sandbox on a
+  fresh clone; failures go to the replanner up to `max_acceptance_failures`,
+  then to the user; success marks the project done and (after the milestone
+  checkpoint) pushes and opens a GitHub PR via the REST API. Adding or
+  retrying a task reopens a finished project. Stop / E-stop kill a running
+  acceptance check.
+
+### Validation coverage after M3
+
+| Check | Status |
+|---|---|
+| V5.1 same error 3× trips loop detection | ✅ failure signatures + gateway repeat detection (`tests/test_autonomy.py`, `tests/test_gateway.py`) |
+| V5.3 iteration / token / time budgets | ✅ `test_request_budget_trips_watchdog`, `test_token_budget_trips_watchdog`, `test_watchdog_trip_kills_the_running_agent`, `test_timeout` |
+| V5.4 escalation order with an event per step | ✅ `test_retries_then_blocks_without_planner`, `test_split_after_retries`, `test_unusable_split_blocks`, `test_same_failure_repeating_skips_retries` |
+| V6.1 revision with reasons after each task | ✅ `test_replan_after_task_applies_ops` |
+| V6.2 spec edits gated | ✅ `test_spec_change_is_always_gated` |
+| V6.3 growth cap gated | ✅ `test_replan_growth_cap_needs_approval` |
+| V7.1 runs to completion without input (optional gates off) | ✅ `test_runs_to_done_without_any_input_when_optional_gates_are_off` (spec approval → 3 tasks → 3 reviews → acceptance → done, zero checkpoints) |
+| V7.2 gate → waiting + inbox item | ✅ `test_task_merge_checkpoint`, Playwright `web/e2e/inbox.spec.ts` |
+| Notifications | ✅ `test_new_gate_sends_push_notification` |
+
+### Known gaps carried into M4
+
+- Container network egress restriction (FR-4.6): executors now only *need*
+  the gateway, so the next step is a Docker network that allows nothing else.
+- Per-project toolchain images (`.foreman/Dockerfile`) are written by the
+  planner but not yet built or used.
+- Planner jobs don't count against node capacity; the gateway enforces
+  budgets but not node-level concurrency.
+- Token counts fall back to estimates when a server doesn't report usage.
+- Regression detection is exit-code based.

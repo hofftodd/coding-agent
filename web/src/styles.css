@@ -250,3 +250,46 @@ pre.doc {
 .proposed-body p { margin: 6px 0; }
 .proposed-body .small > div { margin: 2px 0; }
 .task-editor { margin-top: 10px; }
+
+/* M3: inbox, watchdog, revisions */
+.topbar nav .count {
+  display: inline-block; margin-left: 6px; min-width: 18px; padding: 0 5px; border-radius: 999px;
+  background: var(--stop); color: white; font-size: 11px; font-weight: 700; text-align: center;
+}
+.gate h3 { margin: 8px 0; }
+.gate-detail {
+  white-space: pre-wrap; background: var(--code-bg); border-radius: 6px; padding: 10px; margin: 0 0 10px;
+  font-size: 13px; max-height: 300px; overflow: auto;
+}
+.gate .actions input { min-width: 200px; }
+.gate-badge-task_merge { background: var(--accent); color: white; }
+.gate-badge-escalation { background: var(--bad); color: white; }
+.gate-badge-plan_revision, .gate-badge-spec_change { background: var(--warn); color: white; }
+.gate-badge-milestone { background: var(--ok); color: white; }
+.decision-approved { color: var(--ok); }
+.decision-rejected { color: var(--bad); }
+.state-blocked { background: var(--bad); color: white; }
+.state-awaiting_merge { background: var(--warn); color: white; }
+.state-split { color: var(--muted); }
+.state-border-blocked { border-left-color: var(--bad); }
+.state-border-awaiting_merge { border-left-color: var(--warn); }
+.phase-done { background: var(--ok); color: white; }
+.meters { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px 20px; }
+.meter-label { display: flex; justify-content: space-between; font-size: 12px; margin-bottom: 4px; }
+.meter-bar { height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; }
+.meter-fill { height: 100%; background: var(--accent); }
+.meter-fill.warm { background: var(--warn); }
+.meter-fill.hot { background: var(--bad); }
+.milestone-done { border-color: var(--ok); }
+.revision { border-top: 1px solid var(--border); padding: 8px 0; }
+.revision:first-of-type { border-top: none; }
+.revision ul { margin: 6px 0 0; }
+.revision-applied { background: var(--ok); color: white; }
+.revision-pending { background: var(--warn); color: white; }
+.op { font-family: ui-monospace, monospace; font-size: 11px; padding: 0 4px; border-radius: 3px; }
+.op-add { background: var(--add); }
+.op-remove { background: var(--del); }
+.op-modify { background: var(--surface-2); }
+.ev-watchdog .ev-msg { color: var(--bad); }
+.ev-gate .ev-msg { color: var(--warn); font-weight: 600; }
+.ev-replan .ev-msg { color: var(--accent); }

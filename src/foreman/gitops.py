@@ -135,6 +135,16 @@ def changed_files(path: Path) -> list[str]:
     return sorted({f for f in (out + untracked).splitlines() if f})
 
 
+def diff_size(path: Path) -> int:
+    """Lines added + removed since the task started (committed changes)."""
+    total = 0
+    for line in _read("diff", "--numstat", BASE_REF, cwd=path).splitlines():
+        added, removed, *_ = line.split("\t")
+        if added.isdigit() and removed.isdigit():  # "-" for binary files
+            total += int(added) + int(removed)
+    return total
+
+
 def diff(path: Path) -> str:
     """Unified diff of the task's changes since it started, including new files."""
     if not (path / ".git").exists():
@@ -224,3 +234,35 @@ def write_and_commit(project_id: int, files: dict[str, str], message: str) -> st
 def _staged(repo: Path) -> bool:
     proc = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=repo)
     return proc.returncode != 0
+
+
+def acceptance_dir(project_id: int) -> Path:
+    return project_dir(project_id) / "acceptance"
+
+
+def prepare_acceptance_clone(project_id: int, milestone_branch: str) -> Path:
+    """A fresh clone of the milestone tip, for running the acceptance command."""
+    import shutil
+
+    dest = acceptance_dir(project_id)
+    shutil.rmtree(dest, ignore_errors=True)
+    git(
+        "clone",
+        "--quiet",
+        "--no-hardlinks",
+        "--branch",
+        milestone_branch,
+        str(repo_dir(project_id)),
+        str(dest),
+    )
+    return dest
+
+
+def github_repo(url: str) -> tuple[str, str] | None:
+    """(owner, repo) for a GitHub URL, else None."""
+    import re
+
+    m = re.match(
+        r"^(?:https://github\.com/|git@github\.com:)([^/]+)/([^/]+?)(?:\.git)?/?$", url.strip()
+    )
+    return (m.group(1), m.group(2)) if m else None

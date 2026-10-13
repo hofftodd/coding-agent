@@ -31,6 +31,13 @@ class Settings:
     # Used only by the orchestrator for clone/fetch/push; never passed to executors.
     github_token: str = field(default_factory=lambda: _env("GITHUB_TOKEN", ""))
     poll_interval_s: float = field(default_factory=lambda: float(_env("POLL_INTERVAL_S", "0.5")))
+    # Push notifications for the inbox: an ntfy topic URL, e.g. https://ntfy.sh/my-foreman
+    ntfy_url: str = field(default_factory=lambda: _env("NTFY_URL", ""))
+    # Where the dashboard is reachable, for links in notifications.
+    public_url: str = field(default_factory=lambda: _env("PUBLIC_URL", ""))
+    # Model gateway: executors reach their model through the orchestrator.
+    gateway_host: str = field(default_factory=lambda: _env("GATEWAY_HOST", "0.0.0.0"))
+    gateway_port: int = field(default_factory=lambda: int(_env("GATEWAY_PORT", "8701")))
 
     @property
     def db_path(self) -> Path:

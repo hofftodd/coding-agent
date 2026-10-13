@@ -6,8 +6,8 @@ small, context-bounded subtasks on local (or cloud) models, with an
 orchestrator that watches for runaway agents, replans after each task, and a
 big red stop button.
 
-Status: **M2 (specify & decompose) implemented** on top of M1 (sandboxed
-execution + stop controls). Specs, plan and acceptance criteria live in
+Status: **M3 (autonomy) implemented**, on top of M2 (specify & decompose) and
+M1 (sandboxed execution + stop controls). Specs, plan and acceptance criteria live in
 [`specs/000-orchestrator/`](specs/000-orchestrator/).
 
 ## How a project goes
@@ -27,11 +27,37 @@ execution + stop controls). Specs, plan and acceptance criteria live in
 4. **Review the plan** (optional checkpoint, on by default). Edit, drop or
    re-run tasks; tasks still too big block approval. `tasks.md` is committed
    alongside the spec.
-5. **Execute.** Tasks run one at a time per project in Docker containers built
-   from `ubuntu:24.04`, using OpenCode as the coding agent. Each task's work is
-   committed, checked against its allowed files, validated in the sandbox
-   together with the project test command, and merged into the milestone
-   branch.
+5. **Execute, autonomously.** Tasks run one at a time per project in Docker
+   containers built from `ubuntu:24.04`, using OpenCode as the coding agent.
+   Each task's work is committed, checked against its allowed files and a
+   diff-size limit, validated in the sandbox together with the project test
+   command, and merged into the milestone branch.
+   - **Watchdog.** Executors reach their model only through Foreman's *model
+     gateway*, which counts calls and tokens against per-attempt budgets,
+     stops an agent that keeps returning the same response, and adds the
+     node's API key itself (keys never enter containers). Hitting a limit
+     kills the attempt.
+   - **Escalation.** A failed attempt is retried with a fresh agent session
+     (told why the last one failed); if that keeps failing, or the same
+     failure repeats, the planner splits the task into smaller ones; then it
+     moves to an optional stronger *escalation* model; then it is blocked
+     and lands in your inbox.
+   - **Replanning.** After each task, a reviewer model checks the remaining
+     plan against the goal and adds, removes or changes tasks, each with a
+     reason. Revisions are recorded and `tasks.md` is updated. Growth beyond
+     a cap (default +50% of the approved plan) waits for your approval, and
+     spec changes always do.
+6. **Done.** When every task is done, the acceptance command runs on a fresh
+   checkout of the milestone branch. If it fails, the replanner gets the
+   output and adds work. If it passes, the project is done, and after your
+   approval the branch is pushed and a GitHub pull request is opened.
+
+**Needs you.** Everything waiting for a decision (blocked tasks, plan
+revisions over the cap, spec changes, optional merge approvals, the finished
+milestone) collects in one inbox, with optional push notifications through
+[ntfy](https://ntfy.sh). Which checkpoints are on is a per-project setting;
+with only the always-on ones, a project runs from approved spec to pull
+request by itself.
 
 Throughout: a live dashboard (task board, streaming planner and agent output,
 diffs, run history) and **Pause / Stop / E-stop** at task, project and global
@@ -57,6 +83,15 @@ writes are committed to the repo.
 implement, their dependencies and how they'll be validated.
 
 ![Plan review](docs/screenshots/plan-review.png)
+
+**Needs you:** decisions waiting for you, across all projects.
+
+![Inbox](docs/screenshots/inbox.png)
+
+**Watchdog:** per-attempt budgets, escalation level and every step the
+ladder took.
+
+![Task watchdog](docs/screenshots/task-watchdog.png)
 
 **Project board:** tasks flow from queued to done; dependencies and failure
 reasons are shown on each card.
@@ -99,17 +134,15 @@ uv run foreman up                # api + orchestrator + supervisor
 Open http://127.0.0.1:8700 and add your model servers under **Nodes**:
 
 - Local servers are "OpenAI-compatible", e.g. `http://192.168.1.20:8080/v1`
-  for llama.cpp. Set the context window the model really has: task sizes are
-  computed from it.
+  for llama.cpp, or `http://127.0.0.1:1234/v1` for a server on the same
+  machine (Foreman's gateway connects to it, not the container). Set the
+  context window the model really has: task sizes are computed from it.
 - Claude can be added with provider "Anthropic", base URL
   `https://api.anthropic.com` and your API key. Claude nodes can be planners
   but never executors: API keys must not enter the sandboxes.
 
 Then add a project, choose a planner and an executor (node + model), and
 start talking to the planner.
-
-A model server running on the same host as foreman is reachable from executor
-containers at `http://host.docker.internal:<port>/v1`.
 
 ### Configuration (environment variables)
 
@@ -122,7 +155,10 @@ containers at `http://host.docker.internal:<port>/v1`.
 | `FOREMAN_EXECUTOR_IMAGE` | `foreman/executor-base:latest` | Image for executor containers |
 | `FOREMAN_CONTAINER_CPUS` / `_MEMORY` | `2` / `4g` | Per-container limits |
 | `FOREMAN_STOP_GRACE_S` | `5` | SIGTERM → SIGKILL grace on Stop |
-| `FOREMAN_GITHUB_TOKEN` | *(empty)* | Used by the orchestrator for clone/push of private repos; never passed to executors or written to `.git/config` |
+| `FOREMAN_GITHUB_TOKEN` | *(empty)* | Used by the orchestrator to clone/push and to open milestone pull requests; never passed to executors or written to `.git/config` |
+| `FOREMAN_NTFY_URL` | *(empty)* | Push notifications for the inbox, e.g. `https://ntfy.sh/my-secret-topic` |
+| `FOREMAN_PUBLIC_URL` | *(empty)* | Dashboard URL for links in notifications |
+| `FOREMAN_GATEWAY_HOST` / `_PORT` | `0.0.0.0` / `8701` | Model gateway. Containers must reach it; every URL carries a per-run secret, but you can bind it to the Docker bridge (e.g. `172.17.0.1`) to keep it off the LAN |
 
 ## Architecture
 
@@ -130,7 +166,11 @@ Three OS processes share two SQLite databases:
 
 - **api** (FastAPI): REST + Server-Sent Events + the React dashboard.
 - **orchestrator**: schedules ready tasks and runs each attempt
-  (clone → execute → commit → scope check → validate → merge).
+  (clone → execute → commit → scope check → validate → merge), runs planner
+  jobs (chat, breakdown, splits, plan reviews), acceptance checks, and the
+  model gateway. It is also the only process that writes to the repositories:
+  the API records your decisions on checkpoints and the orchestrator carries
+  them out.
 - **supervisor**: executes Stop/E-stop. It kills containers/process groups
   first, then records the outcome.
 
