@@ -188,6 +188,49 @@ def decompose_system_prompt(
     )
 
 
+def split_system_prompt(
+    project: Project,
+    docs: dict[str, str],
+    tree: list[str],
+    budget_tokens: int,
+    task: dict[str, Any],
+    failures: list[str],
+) -> str:
+    """Ask the planner to split one task that keeps failing into smaller ones."""
+    d = f"specs/{project.feature}"
+    return "\n".join(
+        [
+            "You are the planner for a software project. Split ONE task that coding agents "
+            "keep failing into 2-4 smaller, ordered tasks that together do the same work.",
+            "",
+            "Rules for every new task:",
+            f"- It changes at most {project.max_task_files} files, listed explicitly in "
+            "allowed_files (no wildcards).",
+            f"- Its context must fit in about {budget_tokens} tokens.",
+            "- validation_cmd exits 0 only when that task is done.",
+            "- deps lists keys of the other new tasks that must finish first.",
+            "- Address the failures below: smaller steps, clearer interfaces, earlier tests.",
+            "",
+            "Output ONLY a JSON array in the same format as the task below.",
+            "",
+            "## Task to split",
+            json.dumps(task, indent=2),
+            "",
+            "## Why it failed",
+            *[f"- {f}" for f in failures],
+            "",
+            f"## {d}/spec.md",
+            docs.get("spec", "").strip() or "(empty)",
+            "",
+            f"## {d}/plan.md",
+            docs.get("plan", "").strip() or "(empty)",
+            "",
+            "## Repository files",
+            *(tree[:300] or ["(empty repository)"]),
+        ]
+    )
+
+
 class PlanError(ValueError):
     pass
 
@@ -354,6 +397,8 @@ def render_tasks_md(project: Project, rows: list[dict[str, Any]]) -> str:
         if r.get("context_files"):
             meta.append(f"- Uses: {', '.join(f'`{f}`' for f in r['context_files'])}")
         meta.append(f"- Done when: `{r['validation_cmd'] or '(missing)'}`")
+        if r.get("state"):
+            meta.append(f"- State: {r['state']}")
         lines += meta
         if r.get("todos"):
             lines += ["", *[f"- [ ] {t}" for t in r["todos"]]]

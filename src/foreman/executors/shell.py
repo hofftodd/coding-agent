@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from foreman.core.models import Node, Project, Task
+from foreman.core.models import Project, Task
 from foreman.executors.base import ExecutorInvocation
 
 
@@ -16,7 +16,7 @@ class ShellExecutor:
         self,
         project: Project,
         task: Task,
-        node: Node | None,
+        endpoint: str,
         model: str,
         ctl_dir: Path,
         prompt: str,

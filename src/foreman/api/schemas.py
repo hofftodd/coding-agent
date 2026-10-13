@@ -23,6 +23,8 @@ class ProjectCreate(BaseModel):
     executor_kind: str = "opencode"
     role_bindings: dict[str, RoleBinding] = Field(default_factory=dict)
     push_after_merge: bool = False
+    gates: dict[str, Any] = Field(default_factory=dict)
+    watchdog: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProjectUpdate(BaseModel):
@@ -34,6 +36,7 @@ class ProjectUpdate(BaseModel):
     executor_kind: str | None = None
     role_bindings: dict[str, RoleBinding] | None = None
     gates: dict[str, Any] | None = None
+    watchdog: dict[str, Any] | None = None
     push_after_merge: bool | None = None
 
 

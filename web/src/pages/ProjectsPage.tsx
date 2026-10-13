@@ -10,6 +10,7 @@ const PHASE_LABEL: Record<Project["phase"], string> = {
   decomposing: "planning",
   plan_review: "plan review",
   execute: "executing",
+  done: "done",
 };
 
 function Counts({ p }: { p: Project }) {
@@ -22,6 +23,7 @@ function Counts({ p }: { p: Project }) {
       <span>{c.queued ?? 0} queued</span>
       {(c.failed ?? 0) > 0 && <span className="warn">{c.failed} failed</span>}
       {(c.stopped_by_user ?? 0) > 0 && <span className="warn">{c.stopped_by_user} stopped</span>}
+      {(c.blocked ?? 0) > 0 && <span className="warn">{c.blocked} blocked</span>}
     </div>
   );
 }

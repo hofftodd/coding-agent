@@ -25,6 +25,12 @@ class TaskState(StrEnum):
     PAUSED = "paused"
     STOPPED_BY_USER = "stopped_by_user"
     DISCARDED = "discarded"
+    # Validated, waiting for the user to approve the merge (task_merge checkpoint).
+    AWAITING_MERGE = "awaiting_merge"
+    # The escalation ladder ran out; waiting for the user (an inbox item explains why).
+    BLOCKED = "blocked"
+    # Replaced by smaller tasks.
+    SPLIT = "split"
 
 
 class RunState(StrEnum):
@@ -40,11 +46,29 @@ class ProjectPhase(StrEnum):
     DECOMPOSING = "decomposing"  # planner is breaking the plan into tasks
     PLAN_REVIEW = "plan_review"  # proposed tasks wait for approval
     EXECUTE = "execute"  # tasks run autonomously
+    DONE = "done"  # every task done and the acceptance command passes
 
 
 class JobKind(StrEnum):
     CHAT = "chat"
     DECOMPOSE = "decompose"
+    SPLIT = "split"  # break a failing task into smaller ones
+    REVIEW = "review"  # replan after a task completes or acceptance fails
+
+
+class GateKind(StrEnum):
+    PLAN_REVISION = "plan_revision"  # replanner changes needing approval
+    SPEC_CHANGE = "spec_change"  # replanner wants the spec changed (always gated)
+    TASK_MERGE = "task_merge"  # a validated task waits to be merged
+    ESCALATION = "escalation"  # a task is blocked; retry or discard
+    MILESTONE = "milestone"  # acceptance passed; approve to push / open the PR
+
+
+class GateState(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
 
 
 class JobState(StrEnum):
@@ -79,6 +103,18 @@ class Project(SQLModel, table=True):
     role_bindings: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     # Optional checkpoints, e.g. {"plan_approval": true}. See core/gates.py.
     gates: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # Watchdog limits and escalation policy overrides. See core/watchdog.py.
+    watchdog: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    # Tasks in the approved plan, for the replanner's growth cap.
+    baseline_tasks: int = 0
+    # Times the acceptance command has failed after all tasks were done.
+    acceptance_failures: int = 0
+    # Commit the acceptance command last ran against, and how it went.
+    acceptance_commit: str = ""
+    acceptance_passed: bool = False
+    # How to kill a running acceptance check (like TaskRun.handle).
+    acceptance_handle: str = ""
+    milestone_pr_url: str = ""
     phase: ProjectPhase = ProjectPhase.SPECIFY
     # Specs live in the project repo under specs/<feature>/.
     feature: str = "001-initial"
@@ -133,6 +169,13 @@ class Task(SQLModel, table=True):
     # Why the task breaks the size limits, if it does (blocks plan approval).
     size_violations: list[str] = Field(default_factory=list, sa_column=Column(JSON))
     pack_tokens: int = 0
+    # Escalation ladder: 0 retrying, 1 split requested, 2 on the escalation model.
+    escalation_level: int = 0
+    # Failed attempts at the current escalation level.
+    level_failures: int = 0
+    # Set when created by splitting another task, or by the replanner.
+    parent_id: int | None = None
+    origin: str = "plan"  # plan | manual | split | replan
     # Overrides of the project defaults.
     executor_kind: str = ""
     node_id: int | None = None
@@ -157,6 +200,18 @@ class TaskRun(SQLModel, table=True):
     model: str = ""
     # How to kill it: "docker:<container name>" or "local:<pgid>".
     handle: str = ""
+    # Secret path component for this run's model gateway URL.
+    gateway_token: str = ""
+    model_requests: int = 0
+    tokens_in: int = 0
+    tokens_out: int = 0
+    # Why the watchdog stopped this run (empty = it didn't).
+    watchdog: str = ""
+    # Normalised hash of the failure output, to detect the same failure repeating.
+    error_sig: str = ""
+    # config | watchdog | executor | validation | merge | internal
+    failure_kind: str = ""
+    diff_lines: int = 0
     state: RunState = RunState.RUNNING
     exit_code: int | None = None
     reason: str = ""
@@ -216,6 +271,10 @@ class PlannerJob(SQLModel, table=True):
     project_id: int = Field(foreign_key="project.id", index=True)
     kind: JobKind
     state: JobState = JobState.QUEUED
+    # The task a split job breaks up, or the task whose completion triggered a review.
+    task_id: int | None = None
+    # Extra input, e.g. {"reason": "acceptance failed", "output": "..."} for reviews.
+    payload: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
     node_id: int | None = None
     model: str = ""
     error: str = ""
@@ -224,3 +283,48 @@ class PlannerJob(SQLModel, table=True):
     created_at: float = Field(default_factory=now)
     started_at: float | None = None
     ended_at: float | None = None
+
+
+class Gate(SQLModel, table=True):
+    """A checkpoint waiting for the user: the "Needs you" inbox.
+
+    The API only records the decision; the orchestrator acts on it (sets
+    handled_at), so a single process ever writes to the repository.
+    """
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    task_id: int | None = None
+    kind: GateKind
+    title: str
+    detail: str = ""
+    payload: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    state: GateState = GateState.PENDING
+    note: str = ""
+    created_at: float = Field(default_factory=now)
+    resolved_at: float | None = None
+    handled_at: float | None = None
+
+
+class RevisionState(StrEnum):
+    APPLIED = "applied"
+    PENDING = "pending"  # waiting for approval (gate)
+    REJECTED = "rejected"
+    EMPTY = "empty"  # the reviewer found nothing to change
+
+
+class PlanRevision(SQLModel, table=True):
+    """One replanning step: what the reviewer changed in the task list, and why."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    project_id: int = Field(foreign_key="project.id", index=True)
+    version: int
+    trigger: str  # "task T3 done" | "acceptance failed"
+    summary: str = ""
+    # [{"op": "add"|"remove"|"modify", "key": ..., "task": {...}, "changes": {...},
+    #   "reason": ...}]
+    ops: list[dict[str, Any]] = Field(default_factory=list, sa_column=Column(JSON))
+    spec_change: dict[str, Any] = Field(default_factory=dict, sa_column=Column(JSON))
+    state: RevisionState = RevisionState.APPLIED
+    gate_id: int | None = None
+    created_at: float = Field(default_factory=now)

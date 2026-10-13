@@ -20,6 +20,7 @@ from sqlmodel import col, select
 from sse_starlette.sse import EventSourceResponse
 
 from foreman import gitops
+from foreman.api.inbox import router as inbox_router
 from foreman.api.schemas import (
     ControlRequest,
     NodeCreate,
@@ -32,6 +33,7 @@ from foreman.api.schemas import (
 from foreman.api.spec import recheck_task_size
 from foreman.api.spec import router as spec_router
 from foreman.config import get_settings
+from foreman.core import gates, watchdog
 from foreman.core.models import (
     Control,
     ControlAction,
@@ -99,6 +101,17 @@ def _task_counts(project_id: int | None) -> dict[str, int]:
     return counts
 
 
+def _reopen(project_id: int) -> None:
+    """New work in a finished project: back to executing (acceptance runs again)."""
+    with session() as s:
+        p = s.get(Project, project_id)
+        if p is not None and p.phase == ProjectPhase.DONE:
+            p.phase, p.acceptance_passed = ProjectPhase.EXECUTE, False
+            s.add(p)
+            s.commit()
+            emit(project_id, None, "state", "phase: execute (new work)", phase="execute")
+
+
 def _check_bindings(bindings: dict[str, Any]) -> None:
     """Executors run in sandboxes; cloud providers' keys must never get there (NFR-5)."""
     executor = bindings.get("executor") or {}
@@ -130,6 +143,7 @@ def system() -> dict[str, Any]:
         "runtime": get_settings().runtime,
         "heartbeats": {k: round(t - v, 1) for k, v in heartbeats().items()},
         "executors": sorted(EXECUTORS),
+        "pending_gates": len(gates.pending()),
     }
 
 
@@ -159,6 +173,8 @@ async def create_project(body: ProjectCreate) -> Project:
         executor_kind=body.executor_kind,
         role_bindings=bindings,
         push_after_merge=body.push_after_merge,
+        gates=body.gates,
+        watchdog=body.watchdog,
     )
     with session() as s:
         s.add(p)
@@ -190,7 +206,12 @@ async def create_project(body: ProjectCreate) -> Project:
 @router.get("/api/projects/{project_id}")
 def get_project(project_id: int) -> dict[str, Any]:
     p = _get(Project, project_id)
-    return {**p.model_dump(), "task_counts": _task_counts(project_id)}
+    return {
+        **p.model_dump(),
+        "task_counts": _task_counts(project_id),
+        "watchdog_effective": {k: watchdog.limit(p, k) for k in watchdog.DEFAULTS},
+        "gates_effective": {k: gates.enabled(p, k) for k in gates.DEFAULTS},
+    }
 
 
 @router.patch("/api/projects/{project_id}")
@@ -248,9 +269,11 @@ def create_task(project_id: int, body: TaskCreate) -> Task:
     if body.executor_kind and body.executor_kind not in EXECUTORS:
         raise HTTPException(400, f"unknown executor {body.executor_kind}")
     _check_deps(project_id, body.deps)
-    t = Task(project_id=project_id, **body.model_dump())
+    t = Task(project_id=project_id, **body.model_dump(), origin="manual")
     if p.phase == ProjectPhase.PLAN_REVIEW:
         t.state = TaskState.PROPOSED
+    if p.phase == ProjectPhase.DONE:
+        _reopen(project_id)
     with session() as s:
         s.add(t)
         s.commit()
@@ -313,6 +336,7 @@ def retry_task(task_id: int, body: RetryRequest | None = None) -> Task:
         row.hold = False
         s.add(row)
         s.commit()
+    _reopen(t.project_id)
     transition(task_id, (t.state,), TaskState.QUEUED, "retry requested")
     return _get(Task, task_id)
 
@@ -524,6 +548,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="foreman")
     app.include_router(router)
     app.include_router(spec_router, dependencies=[Depends(require_token)])
+    app.include_router(inbox_router, dependencies=[Depends(require_token)])
     dist = _web_dist()
     if dist.is_dir():
         # The dashboard shell is public; every /api call it makes carries the token.

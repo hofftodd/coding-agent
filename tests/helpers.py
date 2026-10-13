@@ -15,6 +15,8 @@ def make_project(client: Any, origin: Any, **kw: Any) -> dict[str, Any]:
         "repo_url": str(origin),
         "executor_kind": "shell",
         "skip_spec": True,
+        # M1-style behaviour: a failed attempt just fails.
+        "watchdog": {"escalation": False},
         **kw,
     }
     r = client.post("/api/projects", json=body)

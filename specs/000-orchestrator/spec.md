@@ -1,6 +1,6 @@
 # Spec 000 — Local Agent Coding Orchestrator
 
-Status: **Approved for build** · M1, M2 implemented (see plan.md §8–9)
+Status: **Approved for build** · M1–M3 implemented (see plan.md §8–10)
 
 ## 1. Summary
 

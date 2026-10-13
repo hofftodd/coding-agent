@@ -7,14 +7,17 @@ export type TaskState =
   | "failed"
   | "paused"
   | "stopped_by_user"
-  | "discarded";
+  | "discarded"
+  | "awaiting_merge"
+  | "blocked"
+  | "split";
 
 export interface RoleBinding {
   node_id: number | null;
   model: string;
 }
 
-export type ProjectPhase = "specify" | "decomposing" | "plan_review" | "execute";
+export type ProjectPhase = "specify" | "decomposing" | "plan_review" | "execute" | "done";
 
 export interface Project {
   id: number;
@@ -25,6 +28,14 @@ export interface Project {
   max_task_files: number;
   context_budget_pct: number;
   gates: Record<string, unknown>;
+  watchdog: Record<string, unknown>;
+  watchdog_effective?: WatchdogLimits;
+  gates_effective?: Record<string, boolean>;
+  baseline_tasks: number;
+  acceptance_failures: number;
+  acceptance_commit: string;
+  acceptance_passed: boolean;
+  milestone_pr_url: string;
   repo_url: string;
   default_branch: string;
   milestone_branch: string;
@@ -44,6 +55,12 @@ export interface TaskRun {
   model: string;
   handle: string;
   state: "running" | "succeeded" | "failed" | "stopped" | "interrupted";
+  model_requests: number;
+  tokens_in: number;
+  tokens_out: number;
+  watchdog: string;
+  failure_kind: string;
+  diff_lines: number;
   exit_code: number | null;
   reason: string;
   started_at: number;
@@ -64,6 +81,10 @@ export interface Task {
   context_files: string[];
   size_violations: string[];
   pack_tokens: number;
+  escalation_level: number;
+  level_failures: number;
+  parent_id: number | null;
+  origin: string;
   executor_kind: string;
   node_id: number | null;
   model: string;
@@ -108,7 +129,9 @@ export interface FEvent {
     | "gate"
     | "planner"
     | "planner_start"
-    | "planner_end";
+    | "planner_end"
+    | "watchdog"
+    | "replan";
   message: string;
   data: Record<string, unknown>;
   ts: number;
@@ -119,6 +142,7 @@ export interface SystemInfo {
   runtime: string;
   heartbeats: Record<string, number>;
   executors: string[];
+  pending_gates: number;
 }
 
 export interface SpecMessage {
@@ -154,4 +178,46 @@ export interface SpecState {
   messages: SpecMessage[];
   active_job: PlannerJob | null;
   last_job: PlannerJob | null;
+}
+
+export interface WatchdogLimits {
+  escalation: boolean;
+  max_requests: number;
+  max_tokens: number;
+  max_diff_lines: number;
+  repeat_limit: number;
+  max_retries: number;
+  split: boolean;
+  replan: boolean;
+  growth_cap_pct: number;
+  max_acceptance_failures: number;
+}
+
+export type GateKind = "plan_revision" | "spec_change" | "task_merge" | "escalation" | "milestone";
+
+export interface Gate {
+  id: number;
+  project_id: number;
+  task_id: number | null;
+  kind: GateKind;
+  title: string;
+  detail: string;
+  payload: Record<string, unknown>;
+  state: "pending" | "approved" | "rejected" | "cancelled";
+  note: string;
+  created_at: number;
+  resolved_at: number | null;
+  project_name: string;
+  task_title: string;
+}
+
+export interface PlanRevision {
+  id: number;
+  version: number;
+  trigger: string;
+  summary: string;
+  ops: { op: "add" | "remove" | "modify"; key: string; reason: string; task?: { title?: string }; changes?: Record<string, unknown> }[];
+  spec_change: { reason?: string; proposal?: string };
+  state: "applied" | "pending" | "rejected" | "empty";
+  created_at: number;
 }

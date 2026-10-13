@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from foreman.core.models import Node, Project, Task
+from foreman.core.models import Project, Task
 
 
 @dataclass
@@ -28,8 +28,11 @@ class Executor(Protocol):
         self,
         project: Project,
         task: Task,
-        node: Node | None,
+        endpoint: str,
         model: str,
         ctl_dir: Path,
         prompt: str,
-    ) -> ExecutorInvocation: ...
+    ) -> ExecutorInvocation:
+        """`endpoint` is the OpenAI-compatible base URL the executor must use (the
+        run's model gateway URL); it carries no credentials."""
+        ...

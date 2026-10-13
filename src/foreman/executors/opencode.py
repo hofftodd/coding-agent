@@ -1,7 +1,8 @@
 """OpenCode (https://opencode.ai) in non-interactive `run` mode.
 
-The node is registered as an OpenAI-compatible provider named "foreman" in a
-generated config file; the prompt is passed as the run message.
+The run's model gateway URL is registered as an OpenAI-compatible provider
+named "foreman" in a generated config file; the prompt is passed as the run
+message.
 """
 
 from __future__ import annotations
@@ -9,22 +10,21 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from foreman.core.models import Node, Project, Task
+from foreman.core.models import Project, Task
 from foreman.executors.base import ExecutorInvocation
 
 PROVIDER = "foreman"
 
 
-def opencode_config(node: Node, model: str) -> dict:
-    options: dict[str, str] = {"baseURL": node.base_url}
-    if node.api_key:
-        options["apiKey"] = node.api_key
+def opencode_config(endpoint: str, model: str) -> dict:
+    # No API key: the gateway adds the node's key on the host side.
+    options: dict[str, str] = {"baseURL": endpoint, "apiKey": "foreman"}
     return {
         "$schema": "https://opencode.ai/config.json",
         "provider": {
             PROVIDER: {
                 "npm": "@ai-sdk/openai-compatible",
-                "name": f"foreman node {node.name}",
+                "name": "foreman gateway",
                 "options": options,
                 "models": {model: {"name": model}},
             }
@@ -45,15 +45,17 @@ class OpenCodeExecutor:
         self,
         project: Project,
         task: Task,
-        node: Node | None,
+        endpoint: str,
         model: str,
         ctl_dir: Path,
         prompt: str,
     ) -> ExecutorInvocation:
-        if node is None or not model:
-            raise ValueError("opencode executor needs a node and a model")
+        if not endpoint or not model:
+            raise ValueError("opencode executor needs a model endpoint and a model")
         (ctl_dir / "prompt.md").write_text(prompt)
-        (ctl_dir / "opencode.json").write_text(json.dumps(opencode_config(node, model), indent=2))
+        (ctl_dir / "opencode.json").write_text(
+            json.dumps(opencode_config(endpoint, model), indent=2)
+        )
         return ExecutorInvocation(
             command=[
                 "bash",

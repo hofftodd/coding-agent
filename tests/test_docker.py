@@ -119,7 +119,7 @@ async def test_opencode_executor_against_fake_model(client, origin):
     try:
         n = client.post(
             "/api/nodes",
-            json={"name": "fake", "base_url": f"http://host.docker.internal:{llm.port}/v1"},
+            json={"name": "fake", "base_url": llm.url},
         ).json()
         p = make_project(
             client,
@@ -190,7 +190,7 @@ async def test_spec_to_done_with_opencode(client, origin):
         planner_node = client.post("/api/nodes", json={"name": "p", "base_url": llm.url}).json()
         exec_node = client.post(
             "/api/nodes",
-            json={"name": "e", "base_url": f"http://host.docker.internal:{llm.port}/v1"},
+            json={"name": "e", "base_url": llm.url},
         ).json()
         p = client.post(
             "/api/projects",
