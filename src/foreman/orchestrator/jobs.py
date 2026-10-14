@@ -17,6 +17,7 @@ from sqlalchemy import delete, update
 from sqlmodel import col, select
 
 from foreman import gitops
+from foreman.core import spend
 from foreman.core.contextpack import (
     budget_tokens,
     build_pack,
@@ -60,6 +61,7 @@ log = logging.getLogger("foreman.jobs")
 
 MAX_DECOMPOSE_ATTEMPTS = 3
 FLUSH_S = 0.25
+BUDGET_POLL_S = 2.0
 
 
 class JobFailed(Exception):
@@ -181,9 +183,21 @@ class JobRunner:
                 s.add(job)
                 s.commit()
 
+    async def _wait_for_budget(self, node: Node) -> None:
+        """Paid calls wait while the project is at its spend cap."""
+        reason = spend.blocked(self.project_id, node)
+        if not reason:
+            return
+        emit(self.project_id, None, "system", f"planner waiting: {reason}", job_id=self.job_id)
+        while spend.blocked(self.project_id, node):
+            if self.should_abort():
+                raise Aborted()
+            await asyncio.sleep(BUDGET_POLL_S)
+
     async def _call(
         self, node: Node, model: str, system: str, messages: list[dict[str, str]]
     ) -> str:
+        await self._wait_for_budget(node)
         result = await stream_chat(
             node,
             model,
@@ -194,6 +208,7 @@ class JobRunner:
         )
         self._flush()
         self._record_usage(result.input_tokens, result.output_tokens)
+        spend.charge(self.project_id, node, result.input_tokens, result.output_tokens)
         if not result.text.strip():
             raise JobFailed("the planner returned an empty response")
         return result.text

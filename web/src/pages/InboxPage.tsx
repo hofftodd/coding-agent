@@ -12,6 +12,7 @@ const ACTIONS: Record<GateKind, { label: string; approve: string; reject: string
   plan_revision: { label: "Plan change", approve: "Apply changes", reject: "Reject" },
   spec_change: { label: "Spec change", approve: "Record in spec", reject: "Dismiss" },
   milestone: { label: "Milestone", approve: "Push & open PR", reject: "Not now" },
+  budget: { label: "Budget", approve: "Raise the cap", reject: "Pause project" },
 };
 
 function GateCard({ g, onDone }: { g: Gate; onDone: () => void }) {

@@ -11,6 +11,7 @@ from foreman.executors.base import ExecutorInvocation
 class ShellExecutor:
     kind = "shell"
     needs_node = False
+    providers: frozenset[str] = frozenset()
 
     def prepare(
         self,
@@ -20,6 +21,7 @@ class ShellExecutor:
         model: str,
         ctl_dir: Path,
         prompt: str,
+        provider: str = "openai",
     ) -> ExecutorInvocation:
         (ctl_dir / "prompt.md").write_text(prompt)
         (ctl_dir / "script.sh").write_text(task.executor_script or "true\n")

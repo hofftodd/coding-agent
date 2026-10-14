@@ -109,7 +109,8 @@ def chat_system_prompt(
         ">>>",
         f"You may only write {d}/spec.md, {d}/plan.md, {d}/validation.md, files under "
         "tests/acceptance/, and .foreman/Dockerfile (a Dockerfile `FROM foreman/executor-base` "
-        "that installs the language toolchain the project needs).",
+        "that installs the language toolchain and dependencies the project needs: coding agents "
+        "run WITHOUT internet access, so anything they need must be installed in that image).",
         "To set the command that runs the acceptance tests:",
         "<<<ACCEPTANCE_CMD",
         "the command",

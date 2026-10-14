@@ -41,6 +41,18 @@ def docker_runtime(monkeypatch):
     monkeypatch.setenv("FOREMAN_EXECUTOR_IMAGE", IMAGE)
     monkeypatch.setenv("FOREMAN_GITHUB_TOKEN", "ghp_must_not_leak")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-must-not-leak")
+    yield
+    from foreman.config import get_settings
+    from foreman.sandbox import remove_egress_lockdown
+
+    remove_egress_lockdown()
+    images = subprocess.run(
+        ["docker", "images", "-q", "--filter",
+         f"reference=foreman/toolchain-{get_settings().instance_id}-*"],
+        capture_output=True, text=True,
+    ).stdout.split()
+    if images:
+        subprocess.run(["docker", "rmi", "-f", *images], capture_output=True)
 
 
 PROBE = """
@@ -107,8 +119,10 @@ def test_stop_kills_container_within_10s(client, origin):
             proc.wait(10)
 
 
-async def test_opencode_executor_against_fake_model(client, origin):
-    """Real OpenCode in the executor container, driven by a scripted model server."""
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+async def test_opencode_executor_against_fake_model(client, origin, provider):
+    """Real OpenCode in the executor container, driven by a scripted model server
+    speaking the OpenAI chat API or Claude's Messages API."""
     from sqlmodel import select
 
     from foreman.core.models import Event
@@ -117,15 +131,18 @@ async def test_opencode_executor_against_fake_model(client, origin):
 
     llm = FakeLLM().start()
     try:
-        n = client.post(
-            "/api/nodes",
-            json={"name": "fake", "base_url": llm.url},
-        ).json()
+        node = {"name": "fake", "base_url": llm.url}
+        model = MODEL
+        if provider == "anthropic":
+            node = {"name": "claude", "provider": "anthropic", "api_key": "sk-host-only",
+                    "base_url": llm.url.removesuffix("/v1")}
+            model = "claude-haiku-5-5"
+        n = client.post("/api/nodes", json=node).json()
         p = make_project(
             client,
             origin,
             executor_kind="opencode",
-            role_bindings={"executor": {"node_id": n["id"], "model": MODEL}},
+            role_bindings={"executor": {"node_id": n["id"], "model": model}},
         )
         t = make_task(
             client,
@@ -145,6 +162,14 @@ async def test_opencode_executor_against_fake_model(client, origin):
         assert "fake model" in (gitops.repo_dir(p["id"]) / "hello.txt").read_text()
         prompts = json.dumps(llm.requests)
         assert "Create hello.txt" in prompts  # the context pack reached the model
+        if provider == "anthropic":
+            # Native Messages API, with the key added by the gateway on the host.
+            dump = os.environ.get("FOREMAN_DUMP_REQUESTS")
+            if dump:
+                with open(dump, "w") as f:
+                    json.dump({"requests": llm.requests, "headers": llm.headers}, f, default=str)
+            assert any("tools" in r for r in llm.requests)
+            assert all(h.get("x-api-key") == "sk-host-only" for h in llm.headers)
     finally:
         llm.stop()
 
@@ -223,3 +248,80 @@ async def test_spec_to_done_with_opencode(client, origin):
         assert "FR-1 Create hello.txt" in exec_prompts
     finally:
         llm.stop()
+
+
+PROBE_NET = """
+probe() { curl -s -m 4 -o /dev/null -w '%{http_code}' "$1" || true; }
+echo "internet=$(probe https://example.com)" > net.txt
+echo "host=$(probe http://host.docker.internal:$HOST_PORT/)" >> net.txt
+echo "bridge=$(probe http://172.17.0.1:$HOST_PORT/)" >> net.txt
+echo "gateway=$(probe http://foreman-gateway:8701/health)" >> net.txt
+"""
+
+
+@pytest.mark.parametrize("network", ["gateway", "open"])
+async def test_network_modes(client, origin, network):
+    """V4.4: in "gateway" mode an executor reaches the model gateway and nothing else."""
+    import http.server
+    import threading
+
+    server = http.server.ThreadingHTTPServer(("0.0.0.0", 0), http.server.SimpleHTTPRequestHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        p = make_project(client, origin, network=network)
+        port = server.server_address[1]
+        t = make_task(client, p["id"], script=PROBE_NET.replace("$HOST_PORT", str(port)))
+        await drive(Orchestrator(), lambda: task(t["id"]).state in TERMINAL, timeout=120)
+        assert task(t["id"]).state == TaskState.DONE, task(t["id"]).reason
+        from foreman import gitops
+
+        result = dict(
+            line.split("=", 1)
+            for line in (gitops.repo_dir(p["id"]) / "net.txt").read_text().split()
+        )
+    finally:
+        server.shutdown()
+    if network == "gateway":
+        assert result["gateway"] == "200"  # the model is reachable...
+        assert result["internet"] == "000"  # ...and nothing else is
+        assert result["host"] == "000" and result["bridge"] == "000"
+    else:
+        assert result["host"] == "200"
+
+
+TOOLCHAIN = """FROM foreman/executor-base:latest
+USER root
+RUN echo toolchain-ok > /opt/marker
+USER agent
+"""
+
+
+async def test_toolchain_image_built_once_and_used(client, origin):
+    from sqlmodel import select
+
+    from foreman import gitops
+    from foreman.core.models import Event
+    from foreman.db import session
+
+    p = make_project(client, origin)
+    gitops.write_and_commit(p["id"], {".foreman/Dockerfile": TOOLCHAIN}, "toolchain")
+    a = make_task(client, p["id"], script="cat /opt/marker > a.txt")
+    b = make_task(client, p["id"], script="cat /opt/marker > b.txt", deps=[a["id"]])
+    await drive(Orchestrator(), lambda: task(b["id"]).state in TERMINAL, timeout=300)
+    assert task(b["id"]).state == TaskState.DONE, task(b["id"]).reason
+    repo = gitops.repo_dir(p["id"])
+    assert (repo / "a.txt").read_text() == (repo / "b.txt").read_text() == "toolchain-ok\n"
+    with session() as s:
+        builds = [e for e in s.exec(select(Event).where(Event.project_id == p["id"]))
+                  if e.kind == "build" and e.message.startswith("building toolchain image")]
+    assert len(builds) == 1  # the second task reused the image
+
+
+async def test_toolchain_must_derive_from_base(client, origin):
+    from foreman import gitops
+
+    p = make_project(client, origin, watchdog={})
+    gitops.write_and_commit(p["id"], {".foreman/Dockerfile": "FROM ubuntu:24.04\n"}, "bad")
+    t = make_task(client, p["id"], script="true")
+    await drive(Orchestrator(), lambda: task(t["id"]).state == TaskState.BLOCKED, timeout=60)
+    assert "must build FROM foreman/executor-base" in task(t["id"]).reason

@@ -98,6 +98,23 @@ test("capture README screenshots", async ({ page, request }) => {
   await expect.poll(() => state(request, tests), { timeout: 60_000 }).toMatch(/^failed/);
   await expect.poll(() => state(request, cli), { timeout: 60_000 }).toBe("running");
 
+  // Inference nodes: two local servers and Claude (all answered by the scripted model server)
+  const llmRoot = process.env.FAKE_LLM_URL!.replace(/\/v1$/, "");
+  const nodes: Record<string, number> = {};
+  for (const n of [
+    { name: "mac-studio", capacity: 2, context_window: 131072 },
+    { name: "r9700-mini", capacity: 1, context_window: 32768 },
+    { name: "claude-opus", provider: "anthropic", base_url: llmRoot, api_key: "sk-demo", capacity: 2,
+      context_window: 1000000, price_in: 4, price_out: 20 },
+    { name: "claude-haiku", provider: "anthropic", base_url: llmRoot, api_key: "sk-demo", capacity: 4,
+      context_window: 1000000, price_in: 0.1, price_out: 0.5 },
+  ]) {
+    const r = await request.post("/api/nodes", { data: { base_url: process.env.FAKE_LLM_URL, ...n } });
+    const id = ((await r.json()) as { id: number }).id;
+    nodes[n.name] = id;
+    await request.post(`/api/nodes/${id}/check`);
+  }
+
   // 1. Projects overview
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "todo-api" })).toBeVisible();
@@ -108,6 +125,17 @@ test("capture README screenshots", async ({ page, request }) => {
   await expect(page.locator(".column").nth(1)).toContainText("Parse CLI arguments");
   await page.waitForTimeout(3000);
   await shot(page, "project-board");
+
+  // 2b. Progress over time
+  const progress = page.locator("section.card", { has: page.getByRole("heading", { name: "Progress" }) });
+  await expect(progress.locator("svg")).toBeVisible();
+  await progress.screenshot({ path: `${OUT}/project-progress.png` });
+
+  // 2c. Nodes with their load
+  await page.goto("/nodes");
+  await expect(page.getByText("mac-studio")).toBeVisible();
+  await expect(page.locator(".dot.ok").first()).toBeVisible();
+  await shot(page, "nodes");
 
   // 3. Live log of the running task
   await page.goto(`/tasks/${cli}`);
@@ -140,4 +168,26 @@ test("capture README screenshots", async ({ page, request }) => {
   await expect(page.locator(".column").nth(2)).toContainText("Generate API reference", { timeout: 10_000 });
   await shot(page, "estop");
   await page.getByRole("button", { name: "Clear E-stop" }).click();
+
+  // 7. Project settings: which model does what, autonomy, checkpoints, spend cap
+  await request.patch(`/api/projects/${docs}`, {
+    data: {
+      executor_kind: "opencode",
+      spend_cap_usd: 5,
+      watchdog: { escalation: true },
+      role_bindings: {
+        planner: { node_id: nodes["claude-opus"], model: "claude-opus-5-5" },
+        executor: { node_id: nodes["mac-studio"], model: "qwen3-coder-30b" },
+        escalation: { node_id: nodes["claude-opus"], model: "claude-opus-5-5" },
+      },
+    },
+  });
+  await page.goto(`/projects/${docs}`);
+  await page.getByRole("button", { name: "Settings" }).click();
+  const settings = page.locator("form.card", { has: page.getByRole("heading", { name: "Settings" }) });
+  await expect(settings).toBeVisible();
+  // Clip from the full page so the sticky top bar doesn't cover the form.
+  await page.evaluate(() => window.scrollTo(0, 0));
+  const box = (await settings.boundingBox())!;
+  await page.screenshot({ path: `${OUT}/project-settings.png`, fullPage: true, clip: box });
 });

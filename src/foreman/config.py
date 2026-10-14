@@ -38,6 +38,8 @@ class Settings:
     # Model gateway: executors reach their model through the orchestrator.
     gateway_host: str = field(default_factory=lambda: _env("GATEWAY_HOST", "0.0.0.0"))
     gateway_port: int = field(default_factory=lambda: int(_env("GATEWAY_PORT", "8701")))
+    # How often the orchestrator checks each node's health.
+    node_check_s: float = field(default_factory=lambda: float(_env("NODE_CHECK_S", "60")))
 
     @property
     def db_path(self) -> Path:

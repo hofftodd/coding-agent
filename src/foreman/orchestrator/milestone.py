@@ -20,7 +20,7 @@ from typing import Any
 import httpx
 from sqlmodel import col, select
 
-from foreman import gitops
+from foreman import gitops, toolchain
 from foreman.config import get_settings
 from foreman.core import gates, watchdog
 from foreman.core.models import (
@@ -79,6 +79,15 @@ async def run_acceptance(project_id: int, runtime: Runtime) -> None:
     clone = await asyncio.to_thread(
         gitops.prepare_acceptance_clone, project_id, project.milestone_branch
     )
+    try:
+        image = await toolchain.ensure_image(
+            project_id, clone, lambda line: emit(project_id, None, "build", line)
+        )
+    except toolchain.ToolchainError as e:
+        _record(project_id, head, False)
+        emit(project_id, None, "test", f"acceptance could not run: {e}", step="acceptance")
+        _failed(project_id, str(e))
+        return
     ctl = get_settings().runs_dir / f"acceptance-{project_id}"
     ctl.mkdir(parents=True, exist_ok=True)
     spec = StepSpec(
@@ -87,6 +96,8 @@ async def run_acceptance(project_id: int, runtime: Runtime) -> None:
         ctl_dir=ctl,
         command=["bash", "-lc", cmd],
         labels={"foreman.project": str(project_id), "foreman.acceptance": "1"},
+        network=project.network,
+        image=image,
     )
     emit(project_id, None, "test", f"acceptance: $ {cmd}", step="acceptance")
     proc = await runtime.start(spec)

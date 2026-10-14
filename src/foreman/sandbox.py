@@ -40,6 +40,11 @@ class StepSpec:
     command: list[str]  # may reference $FOREMAN_WORKSPACE / $FOREMAN_CTL
     env: dict[str, str] = field(default_factory=dict)
     labels: dict[str, str] = field(default_factory=dict)
+    # "gateway": internal network, only the model gateway reachable (default).
+    # "open": normal bridge network with internet access.
+    network: str = "gateway"
+    # Image override (per-project toolchain image); empty = the executor base image.
+    image: str = ""
 
 
 class Proc:
@@ -125,8 +130,7 @@ class DockerRuntime:
             "ALL",
             "--security-opt",
             "no-new-privileges",
-            "--add-host",
-            "host.docker.internal:host-gateway",
+            *self._network_args(spec),
             "-v",
             f"{spec.workspace}:{WORKSPACE}",
             "-v",
@@ -142,7 +146,13 @@ class DockerRuntime:
             args += ["--label", f"{k}={v}"]
         for k, v in env.items():
             args += ["-e", f"{k}={v}"]
-        return [*args, s.executor_image, *spec.command]
+        return [*args, spec.image or s.executor_image, *spec.command]
+
+    def _network_args(self, spec: StepSpec) -> list[str]:
+        if spec.network == "open":
+            return ["--add-host", "host.docker.internal:host-gateway"]
+        # No route out: only the relay (alias GATEWAY_ALIAS) is reachable.
+        return ["--network", network_name()]
 
     async def start(self, spec: StepSpec) -> Proc:
         proc = await asyncio.create_subprocess_exec(
@@ -196,6 +206,70 @@ def kill_handle(handle: str, grace_s: float | None = None) -> str:
     return "no handle"
 
 
+# -- egress lockdown ----------------------------------------------------------
+#
+# Executors run on an internal Docker network with no route anywhere. A small
+# relay container joins both that network and the default bridge and forwards one
+# port to the model gateway on the host. So an agent can reach its model, and
+# nothing else: no internet, no LAN, no host services.
+
+GATEWAY_ALIAS = "foreman-gateway"
+RELAY_PORT = 8701
+
+
+def network_name() -> str:
+    return f"foreman-net-{get_settings().instance_id}"
+
+
+def relay_name() -> str:
+    return f"foreman-relay-{get_settings().instance_id}"
+
+
+def _docker(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["docker", *args], capture_output=True, text=True)
+
+
+def ensure_egress_lockdown(gateway_port: int) -> str:
+    """Create the internal network and the gateway relay. Returns the gateway URL
+    executors on that network should use."""
+    settings = get_settings()
+    net, relay = network_name(), relay_name()
+    if _docker("network", "inspect", net).returncode != 0:
+        r = _docker("network", "create", "--internal", "--label", "foreman=1",
+                    "--label", f"foreman.instance={settings.instance_id}", net)
+        if r.returncode != 0 and "already exists" not in r.stderr:
+            raise RuntimeError(f"cannot create network {net}: {r.stderr.strip()}")
+    inspect = _docker("inspect", "-f",
+                      '{{.State.Running}} {{index .Config.Labels "foreman.gateway_port"}}', relay)
+    if inspect.returncode == 0 and inspect.stdout.split() != ["true", str(gateway_port)]:
+        _docker("rm", "-f", relay)  # stale: wrong port or stopped
+        inspect = _docker("inspect", relay)
+    if inspect.returncode != 0:
+        r = _docker(
+            "run", "-d", "--name", relay, "--restart", "unless-stopped",
+            "--user", f"{CONTAINER_UID}:{CONTAINER_UID}", "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges", "--memory", "64m", "--pids-limit", "64",
+            "--add-host", "host.docker.internal:host-gateway",
+            "--label", "foreman=1", "--label", f"foreman.instance={settings.instance_id}",
+            "--label", "foreman.relay=1", "--label", f"foreman.gateway_port={gateway_port}",
+            settings.executor_image,
+            "socat", f"TCP-LISTEN:{RELAY_PORT},fork,reuseaddr",
+            f"TCP:host.docker.internal:{gateway_port}",
+        )
+        if r.returncode != 0:
+            raise RuntimeError(f"cannot start the gateway relay: {r.stderr.strip()}")
+        r = _docker("network", "connect", "--alias", GATEWAY_ALIAS, net, relay)
+        if r.returncode != 0 and "already exists" not in r.stderr:
+            raise RuntimeError(f"cannot attach the relay to {net}: {r.stderr.strip()}")
+    return f"http://{GATEWAY_ALIAS}:{RELAY_PORT}"
+
+
+def remove_egress_lockdown() -> None:
+    """Remove this installation's relay and network (uninstall / tests)."""
+    _docker("rm", "-f", relay_name())
+    _docker("network", "rm", network_name())
+
+
 def group_alive(pgid: int) -> bool:
     """True if any non-zombie process is in the group. Zombies wait for their parent to
     reap them and count as dead here."""
@@ -240,5 +314,6 @@ def running_containers() -> dict[str, str]:
     out = {}
     for line in proc.stdout.splitlines():
         name, _, run = line.partition("\t")
-        out[name] = run
+        if name != relay_name():  # the relay is infrastructure, not a run
+            out[name] = run
     return out

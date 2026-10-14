@@ -106,6 +106,12 @@ def after_failure(task_id: int, run_id: int) -> Decision | None:
             return None
         project = s.get(Project, task.project_id)
         assert project is not None
+        if run.failure_kind == "budget":
+            # Not the task's fault: it runs again once the spend cap is raised.
+            d = Decision("retry", "waiting for the spend cap to be raised")
+            emit(project.id, task_id, "watchdog", f"escalation: retry ({d.reason})", action="retry")
+            transition(task_id, (TaskState.FAILED,), TaskState.QUEUED, d.reason)
+            return d
         if not watchdog.limit(project, "escalation"):
             return None
         task.level_failures += 1

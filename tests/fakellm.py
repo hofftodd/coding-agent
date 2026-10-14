@@ -104,7 +104,11 @@ class FakeLLM:
             def do_GET(self) -> None:  # noqa: N802
                 outer.headers.append(dict(self.headers.items()))
                 if self.path.split("?", 1)[0].rstrip("/").endswith("/models"):
-                    self._json(200, {"object": "list", "data": [{"id": MODEL, "object": "model"}]})
+                    ids = [MODEL]
+                    if self.headers.get("anthropic-version"):  # asked as the Claude API
+                        ids = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+                    data = [{"id": i, "object": "model", "type": "model"} for i in ids]
+                    self._json(200, {"object": "list", "data": data})
                 else:
                     self._json(404, {"error": "not found"})
 
@@ -175,6 +179,10 @@ class FakeLLM:
             # -- Anthropic Messages -----------------------------------------
 
             def _anthropic(self, req: dict[str, Any]) -> None:
+                call = outer.decide_anthropic(req)
+                if call is not None:
+                    self._anthropic_tool_use(req, call)
+                    return
                 text = outer.planner(req) if outer.planner else "Fake reply"
                 mid = f"msg_{uuid.uuid4().hex[:12]}"
                 model = req.get("model", MODEL)
@@ -244,6 +252,76 @@ class FakeLLM:
                 )
                 event("message_stop", {"type": "message_stop"})
 
+            def _anthropic_tool_use(self, req: dict[str, Any], call: dict[str, Any]) -> None:
+                mid = f"msg_{uuid.uuid4().hex[:12]}"
+                usage = {"input_tokens": 10, "output_tokens": 5}
+                block = {"type": "tool_use", "id": call["id"], "name": call["name"]}
+                if not req.get("stream"):
+                    self._json(
+                        200,
+                        {
+                            "id": mid,
+                            "type": "message",
+                            "role": "assistant",
+                            "model": req.get("model", MODEL),
+                            "content": [{**block, "input": call["input"]}],
+                            "stop_reason": "tool_use",
+                            "stop_sequence": None,
+                            "usage": usage,
+                        },
+                    )
+                    return
+                self._sse_start()
+
+                def event(name: str, data: dict[str, Any]) -> bool:
+                    return self._send(f"event: {name}\ndata: {json.dumps(data)}\n\n".encode())
+
+                event(
+                    "message_start",
+                    {
+                        "type": "message_start",
+                        "message": {
+                            "id": mid,
+                            "type": "message",
+                            "role": "assistant",
+                            "model": req.get("model", MODEL),
+                            "content": [],
+                            "stop_reason": None,
+                            "stop_sequence": None,
+                            "usage": {"input_tokens": 10, "output_tokens": 1},
+                        },
+                    },
+                )
+                event(
+                    "content_block_start",
+                    {
+                        "type": "content_block_start",
+                        "index": 0,
+                        "content_block": {**block, "input": {}},
+                    },
+                )
+                event(
+                    "content_block_delta",
+                    {
+                        "type": "content_block_delta",
+                        "index": 0,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": json.dumps(call["input"]),
+                        },
+                    },
+                )
+                event("content_block_stop", {"type": "content_block_stop", "index": 0})
+                event(
+                    "message_delta",
+                    {
+                        "type": "message_delta",
+                        "delta": {"stop_reason": "tool_use", "stop_sequence": None},
+                        "usage": {"output_tokens": 5},
+                    },
+                )
+                event("message_stop", {"type": "message_stop"})
+
         self.server = http.server.ThreadingHTTPServer((host, port), Handler)
         self.port = self.server.server_address[1]
 
@@ -266,6 +344,22 @@ class FakeLLM:
             return {"role": "assistant", "content": None, "tool_calls": [call]}, "tool_calls"
         text = self.planner(req) if self.planner else "Fake task"
         return {"role": "assistant", "content": text}, "stop"
+
+    def decide_anthropic(self, req: dict[str, Any]) -> dict[str, Any] | None:
+        """Like `decide`, for the Messages API: write the file once, then finish."""
+        for m in req.get("messages", []):
+            content = m.get("content")
+            if isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+            ):
+                return None
+        if "write" in {t.get("name") for t in req.get("tools") or []}:
+            return {
+                "id": f"toolu_{uuid.uuid4().hex[:8]}",
+                "name": "write",
+                "input": {"filePath": FILE_PATH, "content": FILE_CONTENT},
+            }
+        return None
 
     def start(self) -> FakeLLM:
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
