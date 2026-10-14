@@ -29,6 +29,7 @@ def _literal(paths: list[str]) -> list[str]:
 class AiderExecutor:
     kind = "aider"
     needs_node = True
+    providers = frozenset({"openai"})
 
     def prepare(
         self,
@@ -38,6 +39,7 @@ class AiderExecutor:
         model: str,
         ctl_dir: Path,
         prompt: str,
+        provider: str = "openai",
     ) -> ExecutorInvocation:
         if not endpoint or not model:
             raise ValueError("aider executor needs a model endpoint and a model")

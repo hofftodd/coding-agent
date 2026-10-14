@@ -336,25 +336,16 @@ async def test_missing_planner_binding_fails_the_job(client, origin):
     assert job.state == JobState.FAILED and "no planner" in job.error
 
 
-def test_cloud_nodes_cannot_be_executors(client, origin):
-    n = client.post(
-        "/api/nodes",
-        json={
-            "name": "claude",
-            "provider": "anthropic",
-            "base_url": "https://api.anthropic.com",
-            "api_key": "sk",
-        },
-    ).json()
+def test_bindings_must_name_existing_nodes(client, origin):
     r = client.post(
         "/api/projects",
         json={
             "name": "x",
             "repo_url": str(origin),
-            "role_bindings": {"executor": {"node_id": n["id"], "model": "claude-opus-5-5"}},
+            "role_bindings": {"escalation": {"node_id": 999, "model": "m"}},
         },
     )
-    assert r.status_code == 400 and "not executors" in r.json()["detail"]
+    assert r.status_code == 400 and "escalation node not found" in r.json()["detail"]
 
 
 async def test_tasks_do_not_run_before_execute_phase(client, origin, llm):

@@ -286,9 +286,11 @@ class TaskRunner:
                 node = s.get(Node, node_id)
         if executor.needs_node and (node is None or not model):
             raise ConfigError("no executor node/model configured for this project or task")
-        if executor.needs_node and node is not None and node.provider != "openai":
-            # Cloud keys must never enter a sandbox (NFR-5).
-            raise ConfigError(f"node {node.name} ({node.provider}) cannot run executors")
+        if executor.needs_node and node is not None and node.provider not in executor.providers:
+            raise ConfigError(
+                f"the {kind} executor can't use node {node.name} ({node.provider} API); "
+                f"it supports: {', '.join(sorted(executor.providers))}"
+            )
         endpoint = ""
         if executor.needs_node:
             base = self.gateway_urls.get(project.network, "")
@@ -316,7 +318,15 @@ class TaskRunner:
                 kind="too_big",
             )
         (self.run_dir / "context_pack.md").write_text(pack.text)
-        inv = executor.prepare(project, task, endpoint, model, self.run_dir / "ctl", pack.text)
+        inv = executor.prepare(
+            project,
+            task,
+            endpoint,
+            model,
+            self.run_dir / "ctl",
+            pack.text,
+            provider=node.provider if node else "openai",
+        )
         self._emit(
             "system", f"executor {kind} starting" + (f" on {node.name} / {model}" if node else "")
         )

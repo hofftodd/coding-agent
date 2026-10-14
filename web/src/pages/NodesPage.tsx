@@ -26,8 +26,8 @@ export default function NodesPage() {
         <h1>Inference nodes</h1>
       </div>
       <p className="muted">
-        OpenAI-compatible endpoints (llama.cpp server, LM Studio, Ollama, MLX, vLLM…). Executors in containers reach
-        the host's own services at <code>host.docker.internal</code>.
+        Local OpenAI-compatible servers (llama.cpp, LM Studio, Ollama, MLX, vLLM…) or the Claude API. Foreman connects
+        to them from this machine; agents reach them only through its gateway, which holds the API keys.
       </p>
       <ErrorNote error={error} />
       <div className="cards">
@@ -41,7 +41,7 @@ export default function NodesPage() {
             </div>
             <div className="mono small">{n.base_url}</div>
             <div className="small muted">
-              {n.provider === "anthropic" ? "Claude API (planner only)" : "OpenAI-compatible"} · capacity {n.capacity} ·{" "}
+              {n.provider === "anthropic" ? "Claude API" : "OpenAI-compatible"} · capacity {n.capacity} ·{" "}
               {n.context_window.toLocaleString()} ctx · checked {fmtTime(n.last_checked)}{" "}
               {n.has_api_key && "· api key set"}
             </div>
@@ -101,7 +101,7 @@ export default function NodesPage() {
           <Field label="Name">
             <input required value={f.name} placeholder="mac-studio" onChange={(e) => setF({ ...f, name: e.target.value })} />
           </Field>
-          <Field label="Provider" hint="Claude can be a planner; executors must be local/OpenAI-compatible">
+          <Field label="Provider" hint="Either can serve any role; Claude works with the OpenCode executor">
             <select
               value={f.provider}
               onChange={(e) =>

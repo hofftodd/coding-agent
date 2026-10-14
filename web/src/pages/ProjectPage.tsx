@@ -125,14 +125,12 @@ function RoleFields({
   binding,
   onChange,
   listId,
-  allowCloud,
 }: {
   label: string;
   nodes: Node[] | null;
   binding: { node_id: string; model: string };
   onChange: (b: { node_id: string; model: string }) => void;
   listId: string;
-  allowCloud: boolean;
 }) {
   const node = nodes?.find((n) => String(n.id) === binding.node_id);
   return (
@@ -140,13 +138,11 @@ function RoleFields({
       <Field label={`${label} node`}>
         <select value={binding.node_id} onChange={(e) => onChange({ ...binding, node_id: e.target.value })}>
           <option value="">— none —</option>
-          {nodes
-            ?.filter((n) => allowCloud || n.provider === "openai")
-            .map((n) => (
-              <option key={n.id} value={n.id}>
-                {n.name} {n.provider === "anthropic" ? "(Claude)" : ""}
-              </option>
-            ))}
+          {nodes?.map((n) => (
+            <option key={n.id} value={n.id}>
+              {n.name} {n.provider === "anthropic" ? "(Claude)" : ""}
+            </option>
+          ))}
         </select>
       </Field>
       <Field label={`${label} model`}>
@@ -232,9 +228,9 @@ function Settings({ project, onSaved }: { project: Project; onSaved: () => void 
       <h2>Settings</h2>
       <h3>Models</h3>
       <div className="grid2">
-        <RoleFields label="Planner" nodes={nodes} binding={planner} onChange={setPlanner} listId="planner-models" allowCloud />
-        <RoleFields label="Executor" nodes={nodes} binding={executor} onChange={setExecutor} listId="executor-models" allowCloud={false} />
-        <RoleFields label="Escalation" nodes={nodes} binding={escalation} onChange={setEscalation} listId="escalation-models" allowCloud={false} />
+        <RoleFields label="Planner" nodes={nodes} binding={planner} onChange={setPlanner} listId="planner-models" />
+        <RoleFields label="Executor" nodes={nodes} binding={executor} onChange={setExecutor} listId="executor-models" />
+        <RoleFields label="Escalation" nodes={nodes} binding={escalation} onChange={setEscalation} listId="escalation-models" />
         <Field label="Executor">
           <select value={f.executor_kind} onChange={(e) => set("executor_kind", e.target.value)}>
             <option>opencode</option>

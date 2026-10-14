@@ -27,6 +27,8 @@ class ExecutorInvocation:
 class Executor(Protocol):
     kind: str
     needs_node: bool
+    # Node providers whose API the executor's tool can speak (through the gateway).
+    providers: frozenset[str]
 
     def prepare(
         self,
@@ -36,7 +38,9 @@ class Executor(Protocol):
         model: str,
         ctl_dir: Path,
         prompt: str,
+        provider: str = "openai",
     ) -> ExecutorInvocation:
-        """`endpoint` is the OpenAI-compatible base URL the executor must use (the
-        run's model gateway URL); it carries no credentials."""
+        """`endpoint` is the base URL the executor must use (the run's model gateway
+        URL, ending in /v1); it carries no credentials. `provider` says which API it
+        speaks: "openai" (chat completions) or "anthropic" (Claude Messages)."""
         ...

@@ -119,8 +119,10 @@ def test_stop_kills_container_within_10s(client, origin):
             proc.wait(10)
 
 
-async def test_opencode_executor_against_fake_model(client, origin):
-    """Real OpenCode in the executor container, driven by a scripted model server."""
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+async def test_opencode_executor_against_fake_model(client, origin, provider):
+    """Real OpenCode in the executor container, driven by a scripted model server
+    speaking the OpenAI chat API or Claude's Messages API."""
     from sqlmodel import select
 
     from foreman.core.models import Event
@@ -129,15 +131,18 @@ async def test_opencode_executor_against_fake_model(client, origin):
 
     llm = FakeLLM().start()
     try:
-        n = client.post(
-            "/api/nodes",
-            json={"name": "fake", "base_url": llm.url},
-        ).json()
+        node = {"name": "fake", "base_url": llm.url}
+        model = MODEL
+        if provider == "anthropic":
+            node = {"name": "claude", "provider": "anthropic", "api_key": "sk-host-only",
+                    "base_url": llm.url.removesuffix("/v1")}
+            model = "claude-haiku-5-5"
+        n = client.post("/api/nodes", json=node).json()
         p = make_project(
             client,
             origin,
             executor_kind="opencode",
-            role_bindings={"executor": {"node_id": n["id"], "model": MODEL}},
+            role_bindings={"executor": {"node_id": n["id"], "model": model}},
         )
         t = make_task(
             client,
@@ -157,6 +162,14 @@ async def test_opencode_executor_against_fake_model(client, origin):
         assert "fake model" in (gitops.repo_dir(p["id"]) / "hello.txt").read_text()
         prompts = json.dumps(llm.requests)
         assert "Create hello.txt" in prompts  # the context pack reached the model
+        if provider == "anthropic":
+            # Native Messages API, with the key added by the gateway on the host.
+            dump = os.environ.get("FOREMAN_DUMP_REQUESTS")
+            if dump:
+                with open(dump, "w") as f:
+                    json.dump({"requests": llm.requests, "headers": llm.headers}, f, default=str)
+            assert any("tools" in r for r in llm.requests)
+            assert all(h.get("x-api-key") == "sk-host-only" for h in llm.headers)
     finally:
         llm.stop()
 

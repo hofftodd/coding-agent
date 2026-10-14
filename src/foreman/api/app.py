@@ -146,15 +146,15 @@ def _reopen(project_id: int) -> None:
 
 
 def _check_bindings(bindings: dict[str, Any]) -> None:
-    """Executors run in sandboxes; cloud providers' keys must never get there (NFR-5)."""
-    executor = bindings.get("executor") or {}
-    if executor.get("node_id") is not None:
+    """Bound nodes must exist. (Any provider can run executors: they reach it through
+    the model gateway, which holds the key, so no key enters a sandbox - NFR-5.)"""
+    for role, binding in bindings.items():
+        node_id = (binding or {}).get("node_id")
+        if node_id is None:
+            continue
         with session() as s:
-            node = s.get(Node, executor["node_id"])
-        if node is None:
-            raise HTTPException(400, "executor node not found")
-        if node.provider != "openai":
-            raise HTTPException(400, f"{node.provider} nodes can be planners, not executors")
+            if s.get(Node, node_id) is None:
+                raise HTTPException(400, f"{role} node not found")
 
 
 def _check_deps(project_id: int, deps: list[int], self_id: int | None = None) -> None:

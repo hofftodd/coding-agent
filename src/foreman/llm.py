@@ -28,6 +28,22 @@ from foreman.core.models import Node
 # Claude models that accept server-side refusal fallbacks ("default" routing).
 _FALLBACK_MODELS = {"claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"}
 _FALLBACK_BETA = "server-side-fallback-2026-07-01"
+# Models that take output_config.effort. Planning is the work where quality matters
+# most, so it runs at "high" (Opus 5.5 and Haiku 5.5 default to "medium").
+_EFFORT_MODELS = {
+    "claude-fable-5-1",
+    "claude-fable-5",
+    "claude-opus-5-5",
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-5-5",
+    "claude-sonnet-5",
+    "claude-sonnet-4-6",
+    "claude-haiku-5-5",
+}
+PLANNER_EFFORT = "high"
 
 ABORT_POLL_S = 0.5
 
@@ -75,20 +91,22 @@ async def stream_chat(
     system: str,
     messages: list[dict[str, str]],
     *,
-    max_tokens: int = 16000,
+    max_tokens: int | None = None,
     on_text: TextCallback | None = None,
     should_abort: AbortCheck | None = None,
 ) -> ChatResult:
     """Run one chat completion, streaming text to ``on_text``.
 
-    ``messages`` alternate user/assistant with plain-text content.
+    ``messages`` alternate user/assistant with plain-text content. ``max_tokens``
+    defaults to 64k for Claude (streamed, and thinking shares the budget) and 16k
+    for OpenAI-compatible servers, whose models often have smaller windows.
     """
     gate = _AbortGate(should_abort)
     gate(force=True)
     if node.provider == "anthropic":
-        return await _anthropic(node, model, system, messages, max_tokens, on_text, gate)
+        return await _anthropic(node, model, system, messages, max_tokens or 64000, on_text, gate)
     if node.provider == "openai":
-        return await _openai(node, model, system, messages, max_tokens, on_text, gate)
+        return await _openai(node, model, system, messages, max_tokens or 16000, on_text, gate)
     raise LLMError(f"unknown provider {node.provider!r}")
 
 
@@ -169,6 +187,8 @@ async def _anthropic(
         "messages": messages,
         "thinking": {"type": "adaptive"},
     }
+    if model in _EFFORT_MODELS:
+        params["output_config"] = {"effort": PLANNER_EFFORT}
     if model in _FALLBACK_MODELS:
         # On a safety decline, re-run on Anthropic's recommended fallback model.
         params["fallbacks"] = "default"

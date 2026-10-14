@@ -175,10 +175,10 @@ function AddProject({ onDone }: { onDone: (p: Project) => void }) {
             {plannerNode?.models.map((m) => <option key={m} value={m} />)}
           </datalist>
         </Field>
-        <Field label="Executor node" hint="Runs the coding agent; must be local / OpenAI-compatible">
+        <Field label="Executor node" hint="Runs the coding agent (its key never enters the sandbox)">
           <select value={form.node_id} onChange={(e) => set("node_id", e.target.value)}>
             <option value="">— none —</option>
-            {nodes?.filter((n) => n.provider === "openai").map((n) => (
+            {nodes?.map((n) => (
               <option key={n.id} value={n.id}>
                 {n.name}
               </option>

@@ -175,14 +175,32 @@ Open http://127.0.0.1:8700 and add your model servers under **Nodes**:
   machine (Foreman's gateway connects to it, not the container). Set the
   context window the model really has: task sizes are computed from it.
 - Claude can be added with provider "Anthropic", base URL
-  `https://api.anthropic.com` and your API key. Claude nodes can be planners
-  but never executors: API keys must not enter the sandboxes. Enter its
-  prices (USD per million input / output tokens) to track spend.
+  `https://api.anthropic.com` and your API key. Claude can fill any role: the
+  planner calls it directly, and coding agents (OpenCode) reach it through
+  Foreman's gateway, which adds the key on the host, so it never enters a
+  sandbox. Enter its prices (USD per million input / output tokens) to track
+  spend.
 - **Capacity** is how many task attempts and planner calls a node serves at
   once; editable later on the Nodes page.
 
 Then add a project, choose a planner and an executor (node + model), and
 start talking to the planner.
+
+### Trying it on Claude first
+
+To see the whole loop before your local models are set up, run every role on
+Claude: Opus plans and reviews, Sonnet takes escalations, Haiku writes the code.
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+uv run foreman claude-nodes                 # nodes claude-opus / -sonnet / -haiku, with prices
+uv run foreman claude-nodes --project 3     # ...and assign them to project 3's roles
+uv run python scripts/claude_smoke.py       # optional: a tiny project, idea to done, $3 cap
+```
+
+Give projects a spend cap (Settings → Spend) while you experiment. To move to
+local models later, add your local nodes and switch each project's roles in
+its Settings; nothing else changes.
 
 ### Configuration (environment variables)
 
@@ -236,4 +254,5 @@ uv run ruff check src tests && uv run mypy src
 scripts/e2e.sh                   # full stack + Playwright browser tests
 scripts/screenshots.sh           # regenerate docs/screenshots/
 python -m tests.fakellm 8999 --demo  # scripted planner + coding model for demos
+                                 # (speaks both the OpenAI chat and Claude Messages APIs)
 ```

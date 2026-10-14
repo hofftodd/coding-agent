@@ -379,6 +379,16 @@ Design changes made while building M1 (spec updated where relevant):
   branch checked out, uncommitted changes from a cut-off write dropped. Each
   repair is logged as an event on the project.
 
+- **Claude in every role** (post-M4): the gateway also serves Claude's native
+  Messages API (`/g/<token>/v1/messages` → `api.anthropic.com`, key added as
+  `x-api-key` on the host, usage incl. cache reads/writes priced at their
+  rates). OpenCode uses its built-in Anthropic provider pointed at the gateway;
+  Aider stays OpenAI-compatible only (its tasks block with a clear message).
+  Requests are adapted for current models (fixed thinking budgets → adaptive,
+  sampling parameters dropped). Planner calls run at effort `high`.
+  `foreman claude-nodes` creates Opus / Sonnet / Haiku nodes with prices;
+  `scripts/claude_smoke.py` runs a capped idea-to-done project against them.
+
 ### Validation coverage after M4
 
 | Check | Status |
