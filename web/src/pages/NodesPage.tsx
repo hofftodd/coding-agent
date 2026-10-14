@@ -48,7 +48,7 @@ export default function NodesPage() {
             <NodeLoad n={n} />
             {(n.price_in > 0 || n.price_out > 0) && (
               <div className="small">
-                ${n.price_in} / ${n.price_out} per million tokens in / out
+                ${n.price_in.toFixed(2)} / ${n.price_out.toFixed(2)} per million tokens in / out
               </div>
             )}
             <div className="small">{n.models.length ? n.models.join(", ") : <span className="muted">no models listed</span>}</div>

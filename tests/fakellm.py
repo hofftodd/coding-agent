@@ -104,7 +104,11 @@ class FakeLLM:
             def do_GET(self) -> None:  # noqa: N802
                 outer.headers.append(dict(self.headers.items()))
                 if self.path.split("?", 1)[0].rstrip("/").endswith("/models"):
-                    self._json(200, {"object": "list", "data": [{"id": MODEL, "object": "model"}]})
+                    ids = [MODEL]
+                    if self.headers.get("anthropic-version"):  # asked as the Claude API
+                        ids = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+                    data = [{"id": i, "object": "model", "type": "model"} for i in ids]
+                    self._json(200, {"object": "list", "data": data})
                 else:
                     self._json(404, {"error": "not found"})
 

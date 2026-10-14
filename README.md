@@ -12,6 +12,14 @@ autonomy, M4 multi-node scheduling, spend caps, egress lockdown, toolchain
 images, portfolio view, Aider). Specs, plan and acceptance criteria live in
 [`specs/000-orchestrator/`](specs/000-orchestrator/).
 
+<p>
+  <a href="#screenshots"><img src="docs/screenshots/spec-workspace.png" alt="Writing the spec with the planner" width="49%"></a>
+  <a href="#screenshots"><img src="docs/screenshots/project-board.png" alt="Tasks running on the project board" width="49%"></a>
+</p>
+
+*Left: writing the spec with the planner. Right: the agents working through the
+tasks. More in [Screenshots](#screenshots).*
+
 ## How a project goes
 
 1. **Specify.** Chat with a planner model (local, or Claude) about what you
@@ -152,9 +160,16 @@ values, or switch to the table).
 
 ![Progress chart](docs/screenshots/project-progress.png)
 
-**Nodes** with health, load and what's waiting for them.
+**Nodes:** local model servers and Claude side by side, with health, load,
+what's waiting for them and, for paid ones, prices.
 
 ![Nodes](docs/screenshots/nodes.png)
+
+**Project settings:** which model plans, which one codes and which one takes
+over when a task is stuck (local or Claude, per role), plus the sandbox
+network, spend cap, watchdog limits, autonomy and checkpoints.
+
+![Project settings](docs/screenshots/project-settings.png)
 
 ## Quick start
 
